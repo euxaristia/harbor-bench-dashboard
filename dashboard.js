@@ -37,6 +37,13 @@
       const res = await fetch("/api/jobs");
       jobsCache = await res.json();
       renderSidebar();
+      if (selected) {
+        const job = jobsCache.find((j) => j.name === selected.job);
+        const trial = job && job.trials.find((t) => t.name === selected.trial);
+        const statusEl = document.getElementById("trial-status");
+        if (statusEl && trial)
+          statusEl.textContent = trial.status;
+      }
       if (!selected && jobsCache.length) {
         const job = jobsCache[0];
         const trial = job.trials.find((t) => t.status === "running") ?? job.trials[0];
@@ -131,7 +138,7 @@
     <span class="stat">${job ? job.model_name : ""}</span>
     <span class="stat" id="tool-count">${toolCount} tool calls</span>
     <span class="stat" id="elapsed-stat">${currentElapsed()}</span>
-    <span class="stat">${trial ? trial.status : ""}</span>`;
+    <span class="stat" id="trial-status">${trial ? trial.status : ""}</span>`;
   }
   function textNodeOrBubble(container) {
     const last = container.lastElementChild;

@@ -102,6 +102,17 @@ async function pollJobs(): Promise<void> {
     const res = await fetch("/api/jobs");
     jobsCache = await res.json();
     renderSidebar();
+    // The header's status label is set once by updateHeader() when a trial
+    // is selected and otherwise never touched again, unlike elapsed time and
+    // tool count, which pollEvents() refreshes every 1.2s. Without this it
+    // can go on saying "running" for a trial the sidebar (rebuilt from the
+    // same fetch, a few lines up) already correctly shows as stalled or done.
+    if (selected) {
+      const job = jobsCache.find((j) => j.name === selected!.job);
+      const trial = job && job.trials.find((t) => t.name === selected!.trial);
+      const statusEl = document.getElementById("trial-status");
+      if (statusEl && trial) statusEl.textContent = trial.status;
+    }
     if (!selected && jobsCache.length) {
       // The newest job, not "whichever job anywhere in history still says
       // running": an old crashed attempt that never wrote a result.json
@@ -210,7 +221,7 @@ function updateHeader(): void {
     <span class="stat">${job ? job.model_name : ""}</span>
     <span class="stat" id="tool-count">${toolCount} tool calls</span>
     <span class="stat" id="elapsed-stat">${currentElapsed()}</span>
-    <span class="stat">${trial ? trial.status : ""}</span>`;
+    <span class="stat" id="trial-status">${trial ? trial.status : ""}</span>`;
 }
 
 function textNodeOrBubble(container: HTMLElement): HTMLDivElement {
