@@ -283,6 +283,12 @@ def job_summary(job_dir: Path) -> dict:
         "finished_at": (result or {}).get("finished_at"),
         "n_completed": stats.get("n_completed_trials"),
         "n_errored": stats.get("n_errored_trials"),
+        # Harbor records these and they are the only signal that a job ended
+        # without finishing: a run killed mid-flight writes a result.json whose
+        # completed count is short of the total, with the remainder sitting in
+        # running/pending forever. Reading only completed/total hides that.
+        "n_running": stats.get("n_running_trials"),
+        "n_pending": stats.get("n_pending_trials"),
         "n_total": (result or {}).get("n_total_trials"),
         "trials": trials,
     }

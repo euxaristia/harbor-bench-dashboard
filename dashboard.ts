@@ -39,6 +39,8 @@ interface JobSummary {
   finished_at: string | null;
   n_completed: number | null;
   n_errored: number | null;
+  n_running: number | null;
+  n_pending: number | null;
   n_total: number | null;
   trials: TrialSummary[];
 }
@@ -140,6 +142,19 @@ async function pollJobs(): Promise<void> {
   }
 }
 
+// A job that was killed mid-flight still writes a result.json, with the
+// unfinished trials left in running/pending. Showing only "N/M done" made
+// that look like an ordinary finished job that happened to have fewer
+// trials, so the abandoned ones have to be named explicitly.
+function jobProgress(job: JobSummary): string {
+  if (job.n_completed == null) return "";
+  let s = ` &middot; ${job.n_completed}/${job.n_total} done`;
+  const unfinished = (job.n_running || 0) + (job.n_pending || 0);
+  if (unfinished > 0) s += ` &middot; <span class="verifier-bad">${unfinished} unfinished</span>`;
+  if (job.n_errored) s += ` &middot; ${job.n_errored} errored`;
+  return s;
+}
+
 function renderSidebar(): void {
   const el = byId<HTMLDivElement>("sidebar");
   el.innerHTML = "";
@@ -181,7 +196,7 @@ function renderSidebar(): void {
       head.className = "job-head";
       head.innerHTML = `<div class="name">${escapeHtml(job.name)}</div>
         <div class="meta">${escapeHtml(job.model_name || "")} &middot; ${escapeHtml(job.status)}
-        ${job.n_completed != null ? ` &middot; ${job.n_completed}/${job.n_total} done` : ""}</div>`;
+        ${jobProgress(job)}</div>`;
       jobEl.appendChild(head);
       for (const trial of job.trials) {
         const t = document.createElement("div");

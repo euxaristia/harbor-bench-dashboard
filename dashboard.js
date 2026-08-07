@@ -52,6 +52,17 @@
       }
     } catch {}
   }
+  function jobProgress(job) {
+    if (job.n_completed == null)
+      return "";
+    let s = ` &middot; ${job.n_completed}/${job.n_total} done`;
+    const unfinished = (job.n_running || 0) + (job.n_pending || 0);
+    if (unfinished > 0)
+      s += ` &middot; <span class="verifier-bad">${unfinished} unfinished</span>`;
+    if (job.n_errored)
+      s += ` &middot; ${job.n_errored} errored`;
+    return s;
+  }
   function renderSidebar() {
     const el = byId("sidebar");
     el.innerHTML = "";
@@ -90,7 +101,7 @@
         head.className = "job-head";
         head.innerHTML = `<div class="name">${escapeHtml(job.name)}</div>
         <div class="meta">${escapeHtml(job.model_name || "")} &middot; ${escapeHtml(job.status)}
-        ${job.n_completed != null ? ` &middot; ${job.n_completed}/${job.n_total} done` : ""}</div>`;
+        ${jobProgress(job)}</div>`;
         jobEl.appendChild(head);
         for (const trial of job.trials) {
           const t = document.createElement("div");
