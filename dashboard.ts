@@ -39,8 +39,6 @@ interface JobSummary {
   finished_at: string | null;
   n_completed: number | null;
   n_errored: number | null;
-  n_running: number | null;
-  n_pending: number | null;
   n_total: number | null;
   trials: TrialSummary[];
 }
@@ -147,10 +145,15 @@ async function pollJobs(): Promise<void> {
 // that look like an ordinary finished job that happened to have fewer
 // trials, so the abandoned ones have to be named explicitly.
 function jobProgress(job: JobSummary): string {
-  if (job.n_completed == null) return "";
+  if (job.n_completed == null || job.n_total == null) return "";
   let s = ` &middot; ${job.n_completed}/${job.n_total} done`;
-  const unfinished = (job.n_running || 0) + (job.n_pending || 0);
-  if (unfinished > 0) s += ` &middot; <span class="verifier-bad">${unfinished} unfinished</span>`;
+  const unfinished = job.n_total - job.n_completed - (job.n_errored || 0);
+  // Only worth flagging once the job has stopped: while it runs, "unfinished"
+  // is just the trials that have not had their turn yet, which is normal and
+  // not something to colour red.
+  if (unfinished > 0 && job.status !== "running") {
+    s += ` &middot; <span class="verifier-bad">${unfinished} unfinished</span>`;
+  }
   if (job.n_errored) s += ` &middot; ${job.n_errored} errored`;
   return s;
 }

@@ -117,7 +117,12 @@ def trial_summary(trial_dir: Path) -> dict:
         and time.time() - last_activity_at > STALE_AFTER_SECONDS
     )
 
-    if result is not None:
+    # A reward means the verifier has run and scored this trial, which is the
+    # point at which it is finished as far as anyone reading this is
+    # concerned. Harbor writes its own result.json slightly later, so keying
+    # status purely off that file showed rows reading "reward 1, 7/7 checks"
+    # while still counted as unfinished.
+    if result is not None or reward is not None:
         status = "done"
     elif exception_path.exists():
         status = "errored"
@@ -281,15 +286,17 @@ def job_summary(job_dir: Path) -> dict:
         "task_names": task_names,
         "started_at": (result or {}).get("started_at"),
         "finished_at": (result or {}).get("finished_at"),
-        "n_completed": stats.get("n_completed_trials"),
-        "n_errored": stats.get("n_errored_trials"),
-        # Harbor records these and they are the only signal that a job ended
-        # without finishing: a run killed mid-flight writes a result.json whose
-        # completed count is short of the total, with the remainder sitting in
-        # running/pending forever. Reading only completed/total hides that.
-        "n_running": stats.get("n_running_trials"),
-        "n_pending": stats.get("n_pending_trials"),
-        "n_total": (result or {}).get("n_total_trials"),
+        # Counted from the trials actually shown rather than from Harbor's
+        # stats, so the header can never contradict the rows beneath it: its
+        # n_completed_trials lags the verifier by a few seconds, which had the
+        # header saying "4/24 done" above rows already showing rewards.
+        #
+        # The total still comes from Harbor, and has to: trial directories are
+        # created lazily as each one starts, so early in a job most of them do
+        # not exist on disk yet and cannot be counted here.
+        "n_completed": sum(1 for t in trials if t["status"] == "done"),
+        "n_errored": sum(1 for t in trials if t["status"] == "errored"),
+        "n_total": (result or {}).get("n_total_trials") or len(trials),
         "trials": trials,
     }
 

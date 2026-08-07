@@ -53,12 +53,13 @@
     } catch {}
   }
   function jobProgress(job) {
-    if (job.n_completed == null)
+    if (job.n_completed == null || job.n_total == null)
       return "";
     let s = ` &middot; ${job.n_completed}/${job.n_total} done`;
-    const unfinished = (job.n_running || 0) + (job.n_pending || 0);
-    if (unfinished > 0)
+    const unfinished = job.n_total - job.n_completed - (job.n_errored || 0);
+    if (unfinished > 0 && job.status !== "running") {
       s += ` &middot; <span class="verifier-bad">${unfinished} unfinished</span>`;
+    }
     if (job.n_errored)
       s += ` &middot; ${job.n_errored} errored`;
     return s;
