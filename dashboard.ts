@@ -336,7 +336,7 @@ function renderEvent(container: HTMLElement, ev: BenchEvent): void {
       closeOpenBubble(container);
       const b = document.createElement("div");
       b.className = "banner error";
-      b.textContent = (ev as BenchErrorEvent).message || "error";
+      b.textContent = stripAnsi((ev as BenchErrorEvent).message || "error");
       container.appendChild(b);
       break;
     }
@@ -353,13 +353,15 @@ function renderEvent(container: HTMLElement, ev: BenchEvent): void {
     case "final":
       break; // final duplicates the streamed text bubbles; run_start has nothing to show yet
     case "raw": {
-      // A stray non-JSON line on the same fd (a warning printed to stderr,
-      // most commonly) — real, worth showing, but not a structured event.
+      // Any line that is not JSON. Usually a stray warning on the same fd,
+      // but a whole log in another format (a plain terminal capture, say)
+      // arrives as nothing but these, so this is the path most likely to
+      // carry raw terminal output and it needs the ANSI strip most.
       closeOpenBubble(container);
       const b = document.createElement("div");
       b.className = "bubble";
       b.style.color = "var(--dim)";
-      b.textContent = (ev as BenchRawEvent).text || "";
+      b.textContent = stripAnsi((ev as BenchRawEvent).text || "");
       container.appendChild(b);
       break;
     }

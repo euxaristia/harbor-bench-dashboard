@@ -215,7 +215,7 @@
         closeOpenBubble(container);
         const b = document.createElement("div");
         b.className = "banner error";
-        b.textContent = ev.message || "error";
+        b.textContent = stripAnsi(ev.message || "error");
         container.appendChild(b);
         break;
       }
@@ -236,7 +236,7 @@
         const b = document.createElement("div");
         b.className = "bubble";
         b.style.color = "var(--dim)";
-        b.textContent = ev.text || "";
+        b.textContent = stripAnsi(ev.text || "");
         container.appendChild(b);
         break;
       }
