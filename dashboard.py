@@ -30,8 +30,12 @@ dump respectively, rather than being dropped. So an agent that emits a
 completely different schema is still watchable, just without the nice
 tool-call bubbles.
 
-Stdlib only, on purpose: this is a small local tool, not worth a dependency
-for.
+The server is stdlib-only Python; running it needs nothing installed. The
+client is TypeScript (dashboard.ts), compiled ahead of time to dashboard.js,
+which this reads from disk and inlines into the page. Editing the client
+needs bun (`bun build dashboard.ts --target=browser --format=iife
+--outfile=dashboard.js`); running the server does not, since the compiled
+output is committed alongside it.
 
 Usage:
     python dashboard.py [--jobs-dir jobs] [--port 8787]
@@ -40,6 +44,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -142,6 +147,22 @@ def trial_summary(trial_dir: Path) -> dict:
     }
 
 
+def _job_date(job_dir: Path) -> str:
+    # Harbor names a job directory "YYYY-MM-DD__HH-MM-SS" by default, which
+    # is a cheap, reliable date without touching the filesystem. A custom
+    # --job-name won't parse as one, so fall back to the directory's own
+    # creation time rather than lumping every oddly-named job under
+    # "unknown".
+    try:
+        return datetime.date.fromisoformat(job_dir.name[:10]).isoformat()
+    except ValueError:
+        pass
+    try:
+        return datetime.date.fromtimestamp(job_dir.stat().st_ctime).isoformat()
+    except OSError:
+        return "unknown"
+
+
 def job_summary(job_dir: Path) -> dict:
     config = read_json(job_dir / "config.json") or {}
     result = read_json(job_dir / "result.json")
@@ -171,6 +192,7 @@ def job_summary(job_dir: Path) -> dict:
         job_status = "stalled"
     return {
         "name": job_dir.name,
+        "date": _job_date(job_dir),
         "status": job_status,
         "agent_name": agents[0].get("name"),
         "model_name": agents[0].get("model_name"),
@@ -310,243 +332,31 @@ INDEX_HTML = """<!doctype html>
   <div id="header"><span class="empty" style="padding:0">Select a trial</span></div>
   <div id="transcript"><div class="empty">Nothing selected yet. Pick a trial on the left.</div></div>
 </div>
-<script>
-let jobsCache = [];
-let selected = null;      // {job, trial}
-let eventsOffset = 0;
-let toolQueues = {};       // tool name -> array of open <details> elements, FIFO
-let eventsTimer = null;
-let toolCount = 0;
-
-function fmtDuration(seconds) {
-  const s = Math.max(0, Math.round(seconds));
-  return `${Math.floor(s/60)}m ${s%60}s`;
-}
-
-// Anchored to real file timestamps from the server, not to whenever the
-// page happened to load: a trial that stopped producing output hours ago
-// must show a duration that stops too, not one that keeps climbing forever
-// just because the dashboard tab is still open.
-function currentElapsed() {
-  if (!selected) return "";
-  const job = jobsCache.find(j => j.name === selected.job);
-  const trial = job && job.trials.find(t => t.name === selected.trial);
-  if (!trial || trial.started_at == null) return "";
-  const endpoint = trial.status === "running" ? Date.now() / 1000 : (trial.last_activity_at ?? trial.started_at);
-  return fmtDuration(endpoint - trial.started_at);
-}
-
-async function pollJobs() {
-  try {
-    const res = await fetch("/api/jobs");
-    jobsCache = await res.json();
-    renderSidebar();
-    if (!selected && jobsCache.length) {
-      // The newest job, not "whichever job anywhere in history still says
-      // running": an old crashed attempt that never wrote a result.json
-      // stays "running" forever, and it sorts no differently from a trial
-      // that is genuinely active right now.
-      const job = jobsCache[0];
-      const trial = job.trials.find(t => t.status === "running") || job.trials[0];
-      if (trial) selectTrial(job.name, trial.name);
-    }
-  } catch (e) { /* server not up yet, or a job dir mid-write; retry next tick */ }
-}
-
-function renderSidebar() {
-  const el = document.getElementById("sidebar");
-  el.innerHTML = "";
-  for (const job of jobsCache) {
-    const jobEl = document.createElement("div");
-    jobEl.className = "job";
-    const head = document.createElement("div");
-    head.className = "job-head";
-    head.innerHTML = `<div class="name">${job.name}</div>
-      <div class="meta">${job.model_name || ""} &middot; ${job.status}
-      ${job.n_completed != null ? ` &middot; ${job.n_completed}/${job.n_total} done` : ""}</div>`;
-    jobEl.appendChild(head);
-    for (const trial of job.trials) {
-      const t = document.createElement("div");
-      t.className = "trial" + (selected && selected.job === job.name && selected.trial === trial.name ? " selected" : "");
-      const rewardText = trial.reward != null ? `reward ${trial.reward}` : "";
-      t.innerHTML = `<span class="dot ${trial.status}"></span>
-        <span class="tname" title="${trial.name}">${trial.name}</span>
-        <span class="reward">${rewardText}</span>`;
-      t.onclick = () => selectTrial(job.name, trial.name);
-      jobEl.appendChild(t);
-    }
-    el.appendChild(jobEl);
-  }
-}
-
-function selectTrial(job, trial) {
-  selected = {job, trial};
-  eventsOffset = 0;
-  toolQueues = {};
-  toolCount = 0;
-  const jobData = jobsCache.find(j => j.name === job);
-  const trialData = jobData && jobData.trials.find(t => t.name === trial);
-  const transcript = document.getElementById("transcript");
-  // A stalled trial with real bytes on disk still has a transcript worth
-  // showing (the first pollEvents() call below will fetch all of it from
-  // offset 0); only the genuinely empty case needs an explanatory
-  // placeholder instead of real content there will never be any of.
-  if (trialData && trialData.status === "stalled" && !trialData.agent_bytes) {
-    transcript.innerHTML = `<div class="empty">This trial never wrote any agent output and hasn't in over two minutes.
-      It most likely crashed before the agent started (check trial.log / exception.txt in its job directory).</div>`;
-  } else {
-    transcript.innerHTML = `<div class="empty">Waiting for output…</div>`;
-  }
-  renderSidebar();
-  updateHeader();
-  if (eventsTimer) clearInterval(eventsTimer);
-  pollEvents();
-  eventsTimer = setInterval(pollEvents, 1200);
-}
-
-function updateHeader() {
-  const job = jobsCache.find(j => j.name === selected.job);
-  const trial = job && job.trials.find(t => t.name === selected.trial);
-  const el = document.getElementById("header");
-  el.innerHTML = `<span class="title">${selected.trial}</span>
-    <span class="stat">${job ? job.model_name : ""}</span>
-    <span class="stat" id="tool-count">${toolCount} tool calls</span>
-    <span class="stat" id="elapsed-stat">${currentElapsed()}</span>
-    <span class="stat">${trial ? trial.status : ""}</span>`;
-}
-
-function textNodeOrBubble(container) {
-  const last = container.lastElementChild;
-  if (last && last.classList.contains("bubble") && last.dataset.open === "1") return last;
-  const div = document.createElement("div");
-  div.className = "bubble";
-  div.dataset.open = "1";
-  container.appendChild(div);
-  return div;
-}
-function closeOpenBubble(container) {
-  const last = container.lastElementChild;
-  if (last && last.classList.contains("bubble")) last.dataset.open = "0";
-}
-
-function renderToolUse(container, ev) {
-  const details = document.createElement("details");
-  details.className = "tool";
-  details.open = false;
-  const summary = document.createElement("summary");
-  summary.innerHTML = `${ev.name} <span class="badge">running…</span>`;
-  const body = document.createElement("div");
-  body.className = "body";
-  let input = ev.text || "";
-  try { input = JSON.stringify(JSON.parse(input), null, 2); } catch (e) {}
-  body.innerHTML = `<div class="section-label">input</div>${escapeHtml(input)}`;
-  details.appendChild(summary);
-  details.appendChild(body);
-  container.appendChild(details);
-  closeOpenBubble(container);
-  toolCount++;
-  const q = toolQueues[ev.name] || (toolQueues[ev.name] = []);
-  q.push(details);
-}
-
-function renderToolResult(container, ev) {
-  const q = toolQueues[ev.name];
-  const details = q && q.length ? q.shift() : null;
-  if (!details) { renderToolUse(container, {name: ev.name, text: "(no matching call)"}); return; }
-  const summary = details.querySelector("summary");
-  summary.innerHTML = `${ev.name} <span class="badge">done</span>`;
-  const body = details.querySelector(".body");
-  const resultDiv = document.createElement("div");
-  resultDiv.innerHTML = `<div class="section-label">result</div>${escapeHtml(ev.text || "")}`;
-  body.appendChild(resultDiv);
-}
-
-function escapeHtml(s) {
-  return (s || "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
-}
-
-function renderEvent(container, ev) {
-  switch (ev.type) {
-    case "text": {
-      const bubble = textNodeOrBubble(container);
-      bubble.textContent += ev.text;
-      break;
-    }
-    case "tool_use":
-      renderToolUse(container, ev);
-      break;
-    case "tool_result":
-      renderToolResult(container, ev);
-      break;
-    case "error": {
-      closeOpenBubble(container);
-      const b = document.createElement("div");
-      b.className = "banner error";
-      b.textContent = ev.message || "error";
-      container.appendChild(b);
-      break;
-    }
-    case "run_end": {
-      closeOpenBubble(container);
-      const b = document.createElement("div");
-      b.className = "banner end";
-      b.textContent = `run ended: ${ev.status} (exit ${ev.exitCode})`;
-      container.appendChild(b);
-      break;
-    }
-    case "run_start":
-    case "final":
-      break; // final duplicates the streamed text bubbles; run_start has nothing to show yet
-    case "raw": {
-      // A stray non-JSON line on the same fd (a warning printed to stderr,
-      // most commonly) — real, worth showing, but not a structured event.
-      closeOpenBubble(container);
-      const b = document.createElement("div");
-      b.className = "bubble";
-      b.style.color = "var(--dim)";
-      b.textContent = ev.text || "";
-      container.appendChild(b);
-      break;
-    }
-    default: {
-      // An unrecognized but valid JSON event type: still shown, just as a
-      // raw dump, so a differently-shaped agent schema degrades instead of
-      // silently vanishing.
-      const b = document.createElement("div");
-      b.className = "bubble";
-      b.textContent = JSON.stringify(ev);
-      container.appendChild(b);
-    }
-  }
-}
-
-async function pollEvents() {
-  if (!selected) return;
-  try {
-    const res = await fetch(`/api/jobs/${selected.job}/trials/${selected.trial}/events?offset=${eventsOffset}`);
-    const data = await res.json();
-    eventsOffset = data.offset;
-    if (data.events.length) {
-      const container = document.getElementById("transcript");
-      const placeholder = container.querySelector(".empty");
-      if (placeholder) placeholder.remove();
-      const stickToBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 40;
-      for (const ev of data.events) renderEvent(container, ev);
-      if (stickToBottom) container.scrollTop = container.scrollHeight;
-      const tc = document.getElementById("tool-count");
-      if (tc) tc.textContent = `${toolCount} tool calls`;
-    }
-  } catch (e) { /* trial dir may not exist yet right after selection; next tick will find it */ }
-  const es = document.getElementById("elapsed-stat");
-  if (es) es.textContent = currentElapsed();
-}
-
-pollJobs();
-setInterval(pollJobs, 4000);
-</script>
+<script>__DASHBOARD_JS__</script>
 </body>
 </html>
 """
+
+
+DASHBOARD_JS_PATH = Path(__file__).resolve().with_name("dashboard.js")
+
+
+def _render_index() -> bytes:
+    # Read fresh on every request rather than once at import time: this is a
+    # local dev tool, and picking up a `bun build` re-run without needing to
+    # restart the server is worth the cost of a few-KB file read per page
+    # load. The client is hand-written TypeScript (dashboard.ts), compiled to
+    # this file, so the fix for a broken page is `bun build ...`, not editing
+    # this string.
+    try:
+        js = DASHBOARD_JS_PATH.read_text(encoding="utf-8")
+    except OSError:
+        js = (
+            "document.body.textContent = "
+            "'dashboard.js is missing. Run: bun build dashboard.ts "
+            "--target=browser --format=iife --outfile=dashboard.js';"
+        )
+    return INDEX_HTML.replace("__DASHBOARD_JS__", js).encode("utf-8")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -569,7 +379,7 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(parts_url.query)
 
         if not parts:
-            body = INDEX_HTML.encode("utf-8")
+            body = _render_index()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))

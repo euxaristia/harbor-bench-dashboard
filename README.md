@@ -5,11 +5,16 @@ benchmark jobs as they run, instead of reading `jobs/<name>/*/agent/*.txt`
 by hand or waiting for the run to finish before you find out it looped for
 an hour.
 
-It's one Python file, standard library only, no dependencies to install.
-It just reads the `jobs/` directory Harbor already writes to and serves a
-page that polls for updates, so it works with a run started any way at all
-(this script, a bare `harbor run`, a cron job) as long as it points at the
-same jobs directory.
+The server (`dashboard.py`) is standard-library Python, nothing to install
+to run it. It reads the `jobs/` directory Harbor already writes to and
+serves a page that polls for updates, so it works with a run started any
+way at all (this script, a bare `harbor run`, a cron job) as long as it
+points at the same jobs directory.
+
+The client (`dashboard.ts`) is TypeScript, compiled ahead of time with
+[bun](https://bun.sh) to the `dashboard.js` this repo ships. You only need
+bun if you're editing the client; running the server needs nothing beyond
+Python.
 
 ## Usage
 
@@ -17,11 +22,22 @@ same jobs directory.
 python dashboard.py --jobs-dir jobs --port 8787
 ```
 
-Then open `http://127.0.0.1:8787/`. The sidebar lists every job and trial
-under `--jobs-dir`, newest first, and auto-selects the most recent one.
-Clicking a trial streams its transcript live.
+Then open `http://127.0.0.1:8787/`. The sidebar groups jobs by calendar
+date, today expanded and every other day collapsed one click away, newest
+job first within each day, and auto-selects the most recent trial. Clicking
+a trial streams its transcript live.
 
 Binds to `127.0.0.1` only.
+
+## Editing the client
+
+```bash
+bun build dashboard.ts --target=browser --format=iife --outfile=dashboard.js
+```
+
+Commit the regenerated `dashboard.js` alongside your `dashboard.ts` change;
+the server reads it from disk on every request, so a stale compiled file is
+the one way to make the two drift.
 
 ## What it shows
 
