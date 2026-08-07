@@ -254,7 +254,7 @@ function renderToolUse(container: HTMLElement, ev: { name: string; text: string 
   } catch {
     // not JSON; show the raw string as-is
   }
-  body.innerHTML = `<div class="section-label">input</div>${escapeHtml(input)}`;
+  body.innerHTML = `<div class="section-label">input</div>${escapeHtml(stripAnsi(input))}`;
   details.appendChild(summary);
   details.appendChild(body);
   container.appendChild(details);
@@ -275,8 +275,31 @@ function renderToolResult(container: HTMLElement, ev: BenchToolResultEvent): voi
   summary.innerHTML = `${escapeHtml(ev.name)} <span class="badge">done</span>`;
   const body = details.querySelector(".body")!;
   const resultDiv = document.createElement("div");
-  resultDiv.innerHTML = `<div class="section-label">result</div>${escapeHtml(ev.text || "")}`;
+  resultDiv.innerHTML = `<div class="section-label">result</div>${escapeHtml(stripAnsi(ev.text || ""))}`;
   body.appendChild(resultDiv);
+}
+
+// Terminal output reaches us with its ANSI control sequences intact: colour
+// codes, cursor moves, erase-line, the private "hide cursor" pair progress
+// bars use. Rendered as text these show up as literal `[34mINFO` fragments
+// with a replacement glyph where the ESC byte was, which is what a tool that
+// colours its output (pip, twine, cargo) looks like in a transcript.
+//
+// Stripped rather than translated to colour: the value here is a readable
+// transcript, and faithfully reproducing terminal rendering would mean
+// implementing cursor addressing and line erasure, which progress bars rely
+// on, for no real gain.
+// A regex literal, not new RegExp("..."): building this from an escaped
+// string needs every backslash doubled, and getting that wrong yields a
+// pattern that only throws the first time it runs, which neither tsc nor
+// the bundler catches. Covers CSI sequences (colour, cursor movement,
+// erase-line, the show/hide-cursor pair progress bars use) and
+// BEL-terminated OSC, which is every form these logs actually contain.
+const ANSI_PATTERN =
+  /\u001B\[[0-9;?]*[ -\/]*[@-~]|\u001B\][^\u0007]*\u0007/g;
+
+function stripAnsi(s: string): string {
+  return (s || "").replace(ANSI_PATTERN, "");
 }
 
 // Everything rendered here comes from an agent's log: model-authored prose,
@@ -300,7 +323,7 @@ function renderEvent(container: HTMLElement, ev: BenchEvent): void {
   switch (ev.type) {
     case "text": {
       const bubble = textNodeOrBubble(container);
-      bubble.textContent += ev.text;
+      bubble.textContent += stripAnsi((ev as BenchTextEvent).text);
       break;
     }
     case "tool_use":

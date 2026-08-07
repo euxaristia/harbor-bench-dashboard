@@ -168,7 +168,7 @@
     try {
       input = JSON.stringify(JSON.parse(input), null, 2);
     } catch {}
-    body.innerHTML = `<div class="section-label">input</div>${escapeHtml(input)}`;
+    body.innerHTML = `<div class="section-label">input</div>${escapeHtml(stripAnsi(input))}`;
     details.appendChild(summary);
     details.appendChild(body);
     container.appendChild(details);
@@ -188,8 +188,12 @@
     summary.innerHTML = `${escapeHtml(ev.name)} <span class="badge">done</span>`;
     const body = details.querySelector(".body");
     const resultDiv = document.createElement("div");
-    resultDiv.innerHTML = `<div class="section-label">result</div>${escapeHtml(ev.text || "")}`;
+    resultDiv.innerHTML = `<div class="section-label">result</div>${escapeHtml(stripAnsi(ev.text || ""))}`;
     body.appendChild(resultDiv);
+  }
+  var ANSI_PATTERN = /\u001B\[[0-9;?]*[ -\/]*[@-~]|\u001B\][^\u0007]*\u0007/g;
+  function stripAnsi(s) {
+    return (s || "").replace(ANSI_PATTERN, "");
   }
   function escapeHtml(s) {
     return (s || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] || c);
@@ -198,7 +202,7 @@
     switch (ev.type) {
       case "text": {
         const bubble = textNodeOrBubble(container);
-        bubble.textContent += ev.text;
+        bubble.textContent += stripAnsi(ev.text);
         break;
       }
       case "tool_use":
