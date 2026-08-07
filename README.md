@@ -1,0 +1,65 @@
+# harbor-bench-dashboard
+
+A local, read-only web UI for watching [Harbor](https://harborframework.com)
+benchmark jobs as they run, instead of reading `jobs/<name>/*/agent/*.txt`
+by hand or waiting for the run to finish before you find out it looped for
+an hour.
+
+It's one Python file, standard library only, no dependencies to install.
+It just reads the `jobs/` directory Harbor already writes to and serves a
+page that polls for updates, so it works with a run started any way at all
+(this script, a bare `harbor run`, a cron job) as long as it points at the
+same jobs directory.
+
+## Usage
+
+```bash
+python dashboard.py --jobs-dir jobs --port 8787
+```
+
+Then open `http://127.0.0.1:8787/`. The sidebar lists every job and trial
+under `--jobs-dir`, newest first, and auto-selects the most recent one.
+Clicking a trial streams its transcript live.
+
+Binds to `127.0.0.1` only.
+
+## What it shows
+
+- **Job and trial status**: running, done, errored, or `stalled`, a trial
+  with no `result.json` and nothing written to disk in the last two
+  minutes, which is what a crashed harness process looks like from the
+  outside (it never gets a proper result, so nothing else distinguishes it
+  from one that's still actually working).
+- **Elapsed time**, computed from real file timestamps (`lock.json`'s mtime
+  as the start, the most recently modified file as the end), not from when
+  you happened to open the page. A trial that stopped hours ago shows a
+  duration that stops too.
+- **Reward**, once the verifier writes one.
+- **A live transcript**, if the trial's agent log is newline-delimited JSON.
+
+## The transcript schema
+
+The job/trial browsing works for any agent, since it only reads Harbor's
+own files. The transcript view is the one part that's agent-specific: it
+renders a trial's `agent/*.txt` log nicely if each line is a JSON object
+shaped like one of these:
+
+```json
+{"type": "text", "text": "..."}
+{"type": "tool_use", "name": "...", "text": "<raw input>"}
+{"type": "tool_result", "name": "...", "text": "<result>"}
+{"type": "error", "message": "..."}
+{"type": "run_end", "status": "completed", "exitCode": 0}
+```
+
+`tool_use`/`tool_result` pairs are matched in the order they appear, per
+tool name (a FIFO queue, not an id, since not every schema has one).
+
+A line that isn't valid JSON, or a recognized event without a case above,
+is still shown, as plain text or a raw JSON dump, rather than dropped. So
+an agent with a different log format is still watchable, just without the
+nice collapsible tool-call blocks.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
