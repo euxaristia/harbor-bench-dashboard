@@ -56,6 +56,13 @@
     if (job.n_completed == null || job.n_total == null)
       return "";
     let s = ` &middot; ${job.n_completed}/${job.n_total} done`;
+    const scored = job.trials.filter((t) => t.reward != null);
+    if (scored.length) {
+      const passed = scored.filter((t) => (t.reward || 0) > 0).length;
+      const pct = Math.round(passed / scored.length * 100);
+      const cls = passed > 0 ? "verifier-ok" : "verifier-bad";
+      s += ` &middot; <span class="${cls}">${pct}% pass</span>`;
+    }
     const unfinished = job.n_total - job.n_completed - (job.n_errored || 0);
     if (unfinished > 0 && job.status !== "running") {
       s += ` &middot; <span class="verifier-bad">${unfinished} unfinished</span>`;

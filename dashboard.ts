@@ -147,6 +147,17 @@ async function pollJobs(): Promise<void> {
 function jobProgress(job: JobSummary): string {
   if (job.n_completed == null || job.n_total == null) return "";
   let s = ` &middot; ${job.n_completed}/${job.n_total} done`;
+  // Over trials that have actually been scored, not over the whole job: while
+  // a run is in progress, dividing by the total would start every job at 0%
+  // and creep up as trials land, which reads as a falling score rather than
+  // an incomplete one.
+  const scored = job.trials.filter((t) => t.reward != null);
+  if (scored.length) {
+    const passed = scored.filter((t) => (t.reward || 0) > 0).length;
+    const pct = Math.round((passed / scored.length) * 100);
+    const cls = passed > 0 ? "verifier-ok" : "verifier-bad";
+    s += ` &middot; <span class="${cls}">${pct}% pass</span>`;
+  }
   const unfinished = job.n_total - job.n_completed - (job.n_errored || 0);
   // Only worth flagging once the job has stopped: while it runs, "unfinished"
   // is just the trials that have not had their turn yet, which is normal and
