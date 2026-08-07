@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import re
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -90,6 +91,63 @@ def _last_activity_mtime(trial_dir: Path) -> float | None:
     return newest
 
 
+# cairn-code's shell tool defaults to a 10-minute wall-clock cap, so a tool
+# call legitimately in flight can go that long with nothing written. Allow it
+# that plus slack before calling a trial dead.
+TOOL_CALL_GRACE_SECONDS = 15 * 60
+
+# Matches the event's own type field, not a bare "tool_use" anywhere in the
+# line: tool arguments and results routinely quote those words, and matching
+# them would make almost every trial look busy.
+_TOOL_USE_RE = re.compile(rb'"type"\s*:\s*"tool_use"')
+_TOOL_RESULT_RE = re.compile(rb'"type"\s*:\s*"tool_result"')
+
+
+def _awaiting_tool_result(log_path: Path, tail_bytes: int = 256 * 1024) -> bool:
+    """Whether the agent is blocked inside a tool call it has not got back yet.
+
+    Silence is not evidence of death: a trial waiting on a slow command writes
+    nothing for as long as the command runs, which is indistinguishable from a
+    crash by mtime alone. Observed repeatedly here as agents issuing a gRPC
+    call with no deadline and sitting on it until the shell tool's timeout.
+
+    Only the tail is read, and only for the last event of each kind, so this
+    stays cheap enough to run for every trial on every poll.
+    """
+    try:
+        size = log_path.stat().st_size
+        with log_path.open("rb") as fh:
+            if size > tail_bytes:
+                fh.seek(size - tail_bytes)
+            data = fh.read()
+    except OSError:
+        return False
+    last_use = data.rfind(b'"type":"tool_use"')
+    last_result = data.rfind(b'"type":"tool_result"')
+    if last_use == -1:
+        # Fall back to the regex only when the fast path finds nothing, in
+        # case a future writer spaces its JSON differently.
+        u = list(_TOOL_USE_RE.finditer(data))
+        r = list(_TOOL_RESULT_RE.finditer(data))
+        last_use = u[-1].start() if u else -1
+        last_result = r[-1].start() if r else -1
+    return last_use > last_result
+
+
+def _in_flight_tool_call(agent_files: list[Path], last_activity_at: float | None) -> bool:
+    """True while a tool call is plausibly still running.
+
+    Quiet plus an unanswered tool call means waiting, not dead, up to the
+    point where the tool's own timeout must have fired. Past that the silence
+    is unexplained again and the trial goes back to looking stalled.
+    """
+    if not agent_files or last_activity_at is None:
+        return False
+    if time.time() - last_activity_at > TOOL_CALL_GRACE_SECONDS:
+        return False
+    return _awaiting_tool_result(agent_files[0])
+
+
 def trial_summary(trial_dir: Path) -> dict:
     result = read_json(trial_dir / "result.json")
     exception_path = trial_dir / "exception.txt"
@@ -126,13 +184,14 @@ def trial_summary(trial_dir: Path) -> dict:
         status = "done"
     elif exception_path.exists():
         status = "errored"
-    elif stale:
-        # No result.json and nothing on disk has changed in two minutes:
-        # this covers both a process that crashed before writing its first
-        # line and one that wrote real output for a while and then died
-        # mid-run (its parent process crashed, the container was killed from
-        # outside Harbor). Neither ever gets a result.json, so nothing else
-        # distinguishes either from a trial that is genuinely still working.
+    elif stale and not _in_flight_tool_call(agent_files, last_activity_at):
+        # No result.json and nothing on disk has changed for a while: this
+        # covers both a process that crashed before writing its first line and
+        # one that wrote real output and then died mid-run (its parent
+        # crashed, the container was killed from outside Harbor). Neither ever
+        # gets a result.json, so nothing else distinguishes them from a trial
+        # that is still working, except an unanswered tool call, which the
+        # guard above treats as alive.
         status = "stalled"
     else:
         status = "running"
