@@ -88,8 +88,8 @@
         jobEl.className = "job";
         const head = document.createElement("div");
         head.className = "job-head";
-        head.innerHTML = `<div class="name">${job.name}</div>
-        <div class="meta">${job.model_name || ""} &middot; ${job.status}
+        head.innerHTML = `<div class="name">${escapeHtml(job.name)}</div>
+        <div class="meta">${escapeHtml(job.model_name || "")} &middot; ${escapeHtml(job.status)}
         ${job.n_completed != null ? ` &middot; ${job.n_completed}/${job.n_total} done` : ""}</div>`;
         jobEl.appendChild(head);
         for (const trial of job.trials) {
@@ -97,7 +97,7 @@
           t.className = "trial" + (selected && selected.job === job.name && selected.trial === trial.name ? " selected" : "");
           const rewardText = trial.reward != null ? `reward ${trial.reward}` : "";
           t.innerHTML = `<span class="dot ${trial.status}"></span>
-          <span class="tname" title="${trial.name}">${trial.name}</span>
+          <span class="tname" title="${escapeHtml(trial.name)}">${escapeHtml(trial.name)}</span>
           <span class="reward">${rewardText}</span>`;
           t.onclick = () => selectTrial(job.name, trial.name);
           jobEl.appendChild(t);
@@ -134,8 +134,8 @@
     const job = jobsCache.find((j) => j.name === selected.job);
     const trial = job && job.trials.find((t) => t.name === selected.trial);
     const el = byId("header");
-    el.innerHTML = `<span class="title">${selected.trial}</span>
-    <span class="stat">${job ? job.model_name : ""}</span>
+    el.innerHTML = `<span class="title">${escapeHtml(selected.trial)}</span>
+    <span class="stat">${escapeHtml(job ? job.model_name || "" : "")}</span>
     <span class="stat" id="tool-count">${toolCount} tool calls</span>
     <span class="stat" id="elapsed-stat">${currentElapsed()}</span>
     <span class="stat" id="trial-status">${trial ? trial.status : ""}</span>`;
@@ -161,7 +161,7 @@
     details.className = "tool";
     details.open = false;
     const summary = document.createElement("summary");
-    summary.innerHTML = `${ev.name} <span class="badge">running…</span>`;
+    summary.innerHTML = `${escapeHtml(ev.name)} <span class="badge">running…</span>`;
     const body = document.createElement("div");
     body.className = "body";
     let input = ev.text || "";
@@ -185,14 +185,14 @@
       return;
     }
     const summary = details.querySelector("summary");
-    summary.innerHTML = `${ev.name} <span class="badge">done</span>`;
+    summary.innerHTML = `${escapeHtml(ev.name)} <span class="badge">done</span>`;
     const body = details.querySelector(".body");
     const resultDiv = document.createElement("div");
     resultDiv.innerHTML = `<div class="section-label">result</div>${escapeHtml(ev.text || "")}`;
     body.appendChild(resultDiv);
   }
   function escapeHtml(s) {
-    return (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c] || c);
+    return (s || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] || c);
   }
   function renderEvent(container, ev) {
     switch (ev.type) {
