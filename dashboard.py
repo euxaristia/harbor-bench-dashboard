@@ -147,20 +147,34 @@ def trial_summary(trial_dir: Path) -> dict:
     }
 
 
-def _job_date(job_dir: Path) -> str:
-    # Harbor names a job directory "YYYY-MM-DD__HH-MM-SS" by default, which
-    # is a cheap, reliable date without touching the filesystem. A custom
-    # --job-name won't parse as one, so fall back to the directory's own
-    # creation time rather than lumping every oddly-named job under
-    # "unknown".
+def _job_started_at(job_dir: Path) -> float:
+    """Epoch seconds for when the job began, for ordering and grouping.
+
+    Harbor names a job directory "YYYY-MM-DD__HH-MM-SS" by default, which is a
+    reliable start time without touching the filesystem. A custom --job-name
+    won't parse, so fall back to the directory's own creation time.
+
+    Sorting on this rather than on the directory name matters: reverse
+    alphabetical puts letters before digits, so a single job named
+    "my-experiment" outranks every timestamped job forever and buries the run
+    someone just started.
+    """
     try:
-        return datetime.date.fromisoformat(job_dir.name[:10]).isoformat()
+        stamp = datetime.datetime.strptime(job_dir.name[:20], "%Y-%m-%d__%H-%M-%S")
+        return stamp.timestamp()
     except ValueError:
         pass
     try:
-        return datetime.date.fromtimestamp(job_dir.stat().st_ctime).isoformat()
+        return job_dir.stat().st_ctime
     except OSError:
+        return 0.0
+
+
+def _job_date(job_dir: Path) -> str:
+    started = _job_started_at(job_dir)
+    if started <= 0.0:
         return "unknown"
+    return datetime.date.fromtimestamp(started).isoformat()
 
 
 def job_summary(job_dir: Path) -> dict:
@@ -209,7 +223,13 @@ def job_summary(job_dir: Path) -> dict:
 def list_jobs(jobs_dir: Path) -> list[dict]:
     if not jobs_dir.is_dir():
         return []
-    job_dirs = sorted((d for d in jobs_dir.iterdir() if d.is_dir()), reverse=True)
+    # Newest first by real start time. The directory name is only a tiebreak,
+    # so two jobs created in the same second still order deterministically.
+    job_dirs = sorted(
+        (d for d in jobs_dir.iterdir() if d.is_dir()),
+        key=lambda d: (_job_started_at(d), d.name),
+        reverse=True,
+    )
     return [job_summary(d) for d in job_dirs]
 
 
