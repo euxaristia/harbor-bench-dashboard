@@ -231,6 +231,20 @@ def _job_date(job_dir: Path) -> str:
     return datetime.date.fromtimestamp(started).isoformat()
 
 
+def _trial_order(trial: dict) -> tuple:
+    """Passing trials first, then the rest by name.
+
+    In a many-trial job the interesting rows are the ones that scored, and
+    alphabetical order scatters them among a dozen failures. Ranks by reward
+    descending so partial credit lands above zero, and keeps the name as a
+    tiebreak so the order is stable between polls rather than shuffling as
+    rewards land.
+    """
+    reward = trial.get("reward")
+    passed = reward is not None and reward > 0
+    return (0 if passed else 1, -(reward or 0.0), trial["name"])
+
+
 def job_summary(job_dir: Path) -> dict:
     config = read_json(job_dir / "config.json") or {}
     result = read_json(job_dir / "result.json")
@@ -242,7 +256,7 @@ def job_summary(job_dir: Path) -> dict:
     ]
     trials = sorted(
         (trial_summary(d) for d in job_dir.iterdir() if d.is_dir()),
-        key=lambda t: t["name"],
+        key=_trial_order,
     )
     stats = (result or {}).get("stats", {})
     if result and result.get("finished_at"):
