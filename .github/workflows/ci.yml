@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Type-check the client
+        run: bun x tsc --noEmit -p tsconfig.json
+
+      - name: Check dashboard.js matches dashboard.ts
+        run: |
+          bun build dashboard.ts --target=browser --format=iife --outfile=dashboard.js.rebuilt
+          if ! diff -q dashboard.js dashboard.js.rebuilt > /dev/null; then
+            echo "::error::dashboard.js is out of date. Run 'bun build dashboard.ts --target=browser --format=iife --outfile=dashboard.js' and commit the result."
+            diff -u dashboard.js dashboard.js.rebuilt || true
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Syntax-check the server
+        run: python -m py_compile dashboard.py
