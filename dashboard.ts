@@ -4,8 +4,21 @@
 // disk rather than embedding hand-written JS in a Python string. Only
 // editing this file requires bun; running the server does not.
 
+interface VerifierFailure {
+  name: string;
+  status: string;
+  detail: string;
+}
+
+interface VerifierSummary {
+  passed: number | null;
+  total: number | null;
+  failures: VerifierFailure[];
+}
+
 interface TrialSummary {
   name: string;
+  verifier: VerifierSummary | null;
   status: "running" | "done" | "errored" | "stalled";
   agent_file: string | null;
   agent_bytes: number;
@@ -207,6 +220,7 @@ function selectTrial(job: string, trial: string): void {
   }
   renderSidebar();
   updateHeader();
+  renderVerifierBanner(transcript, trialData);
   if (eventsTimer) clearInterval(eventsTimer);
   pollEvents();
   eventsTimer = setInterval(pollEvents, 1200);
@@ -221,7 +235,37 @@ function updateHeader(): void {
     <span class="stat">${escapeHtml(job ? job.model_name || "" : "")}</span>
     <span class="stat" id="tool-count">${toolCount} tool calls</span>
     <span class="stat" id="elapsed-stat">${currentElapsed()}</span>
-    <span class="stat" id="trial-status">${trial ? trial.status : ""}</span>`;
+    <span class="stat" id="trial-status">${trial ? trial.status : ""}</span>
+    ${verifierStat(trial)}`;
+}
+
+function verifierStat(trial: TrialSummary | undefined): string {
+  const v = trial && trial.verifier;
+  if (!v || v.total == null) return "";
+  const cls = v.passed === v.total ? "ok" : "bad";
+  return `<span class="stat verifier-${cls}">${v.passed}/${v.total} checks</span>`;
+}
+
+/// A trial that scored 0 with a clean agent exit is otherwise unexplained:
+/// the reason lives in the verifier, not the transcript. Rendered at the top
+/// so it is visible without scrolling a long log.
+function renderVerifierBanner(container: HTMLElement, trial: TrialSummary | undefined): void {
+  const v = trial && trial.verifier;
+  if (!v || v.total == null) return;
+  const b = document.createElement("div");
+  const allPassed = v.passed === v.total;
+  b.className = "banner " + (allPassed ? "end" : "error");
+  if (allPassed) {
+    b.textContent = `verifier: all ${v.total} checks passed`;
+  } else {
+    const lines = v.failures.map(
+      (f) => `  ${f.name}\n      ${f.detail || "(no detail recorded)"}`,
+    );
+    b.textContent =
+      `verifier: ${v.passed}/${v.total} checks passed, ${v.failures.length} failed\n` +
+      lines.join("\n");
+  }
+  container.prepend(b);
 }
 
 function textNodeOrBubble(container: HTMLElement): HTMLDivElement {

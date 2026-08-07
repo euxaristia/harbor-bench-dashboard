@@ -135,6 +135,10 @@ def trial_summary(trial_dir: Path) -> dict:
     return {
         "name": trial_dir.name,
         "status": status,
+        # Why a trial scored what it did. Reward alone is opaque: a run whose
+        # agent exited cleanly and still scored 0 looks identical to one that
+        # never ran, and the reason is sitting in ctrf.json unread.
+        "verifier": _verifier_summary(trial_dir),
         "agent_file": agent_files[0].name if agent_files else None,
         "agent_bytes": agent_size,
         "reward": reward,
@@ -144,6 +148,56 @@ def trial_summary(trial_dir: Path) -> dict:
         # whenever someone happened to open the page.
         "started_at": started_at,
         "last_activity_at": last_activity_at,
+    }
+
+
+def _failure_detail(trace: str) -> str:
+    """The one line worth reading out of a pytest traceback.
+
+    Most of a trace is the reprinted source of the test function, and the last
+    line is only the file:line of the failure. pytest prefixes the actual
+    error with "E   ", so prefer that; fall back to the last non-empty line
+    for traces in some other shape.
+    """
+    lines = [ln.rstrip() for ln in trace.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    errors = [ln.lstrip()[1:].strip() for ln in lines if ln.lstrip().startswith("E ")]
+    if errors:
+        return errors[-1]
+    return lines[-1].strip()
+
+
+def _verifier_summary(trial_dir: Path) -> dict | None:
+    """Per-check results from the verifier, with messages for the failures.
+
+    Harbor writes pytest output in CTRF form. The failure message is often the
+    single most useful line in the whole trial (a wrong field name, a missing
+    file), so it is worth surfacing rather than leaving someone to open
+    ctrf.json by hand.
+    """
+    ctrf = read_json(trial_dir / "verifier" / "ctrf.json")
+    if not ctrf:
+        return None
+    results = ctrf.get("results", {})
+    summary = results.get("summary") or {}
+    failures = []
+    for test in results.get("tests", []):
+        if test.get("status") == "passed":
+            continue
+        # `trace` carries the assertion detail; `message` is often generic.
+        detail = (test.get("trace") or test.get("message") or "").strip()
+        failures.append(
+            {
+                "name": test.get("name", "?"),
+                "status": test.get("status", "failed"),
+                "detail": _failure_detail(detail),
+            }
+        )
+    return {
+        "passed": summary.get("passed"),
+        "total": summary.get("tests"),
+        "failures": failures,
     }
 
 
@@ -342,6 +396,9 @@ INDEX_HTML = """<!doctype html>
   .banner { padding: 8px 12px; border-radius: 6px; margin: 8px 0; max-width: 900px; }
   .banner.error { background: #3d1418; color: #ffb4ab; border: 1px solid var(--bad); }
   .banner.end { background: #132a1c; color: #9fe0ad; border: 1px solid var(--ok); white-space: pre-wrap; }
+  .verifier-ok { color: var(--ok) !important; }
+  .verifier-bad { color: var(--bad) !important; }
+  .banner.error, .banner.end { white-space: pre-wrap; font-variant-ligatures: none; }
   .empty { color: var(--dim); padding: 40px; text-align: center; }
   a { color: var(--accent); }
 </style>

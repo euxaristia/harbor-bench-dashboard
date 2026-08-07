@@ -123,6 +123,7 @@
     }
     renderSidebar();
     updateHeader();
+    renderVerifierBanner(transcript, trialData);
     if (eventsTimer)
       clearInterval(eventsTimer);
     pollEvents();
@@ -138,7 +139,33 @@
     <span class="stat">${escapeHtml(job ? job.model_name || "" : "")}</span>
     <span class="stat" id="tool-count">${toolCount} tool calls</span>
     <span class="stat" id="elapsed-stat">${currentElapsed()}</span>
-    <span class="stat" id="trial-status">${trial ? trial.status : ""}</span>`;
+    <span class="stat" id="trial-status">${trial ? trial.status : ""}</span>
+    ${verifierStat(trial)}`;
+  }
+  function verifierStat(trial) {
+    const v = trial && trial.verifier;
+    if (!v || v.total == null)
+      return "";
+    const cls = v.passed === v.total ? "ok" : "bad";
+    return `<span class="stat verifier-${cls}">${v.passed}/${v.total} checks</span>`;
+  }
+  function renderVerifierBanner(container, trial) {
+    const v = trial && trial.verifier;
+    if (!v || v.total == null)
+      return;
+    const b = document.createElement("div");
+    const allPassed = v.passed === v.total;
+    b.className = "banner " + (allPassed ? "end" : "error");
+    if (allPassed) {
+      b.textContent = `verifier: all ${v.total} checks passed`;
+    } else {
+      const lines = v.failures.map((f) => `  ${f.name}
+      ${f.detail || "(no detail recorded)"}`);
+      b.textContent = `verifier: ${v.passed}/${v.total} checks passed, ${v.failures.length} failed
+` + lines.join(`
+`);
+    }
+    container.prepend(b);
   }
   function textNodeOrBubble(container) {
     const last = container.lastElementChild;
