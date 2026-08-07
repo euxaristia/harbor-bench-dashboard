@@ -246,10 +246,21 @@ function verifierStat(trial: TrialSummary | undefined): string {
   return `<span class="stat verifier-${cls}">${v.passed}/${v.total} checks</span>`;
 }
 
-/// A trial that scored 0 with a clean agent exit is otherwise unexplained:
-/// the reason lives in the verifier, not the transcript. Rendered at the top
-/// so it is visible without scrolling a long log.
+// The verifier banner, kept as a live reference so it can be moved back to
+// the end of the transcript as new events stream in.
+let verifierBanner: HTMLDivElement | null = null;
+
+/// Keeps the verifier result as the last thing in the transcript. It reports
+/// what happened *after* the agent exited, so showing it above the agent's own
+/// output puts it out of order, and placing it directly before "run ended:
+/// completed" reads as a contradiction. The header's check tally is what makes
+/// it visible without scrolling.
+function keepVerifierLast(container: HTMLElement): void {
+  if (verifierBanner) container.appendChild(verifierBanner);
+}
+
 function renderVerifierBanner(container: HTMLElement, trial: TrialSummary | undefined): void {
+  verifierBanner = null;
   const v = trial && trial.verifier;
   if (!v || v.total == null) return;
   const b = document.createElement("div");
@@ -265,7 +276,8 @@ function renderVerifierBanner(container: HTMLElement, trial: TrialSummary | unde
       `verifier: ${v.passed}/${v.total} checks passed, ${v.failures.length} failed\n` +
       lines.join("\n");
   }
-  container.prepend(b);
+  verifierBanner = b;
+  container.appendChild(b);
 }
 
 function textNodeOrBubble(container: HTMLElement): HTMLDivElement {
@@ -433,6 +445,7 @@ async function pollEvents(): Promise<void> {
       if (placeholder) placeholder.remove();
       const stickToBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 40;
       for (const ev of data.events) renderEvent(container, ev);
+      keepVerifierLast(container);
       if (stickToBottom) container.scrollTop = container.scrollHeight;
       const tc = document.getElementById("tool-count");
       if (tc) tc.textContent = `${toolCount} tool calls`;

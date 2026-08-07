@@ -149,7 +149,13 @@
     const cls = v.passed === v.total ? "ok" : "bad";
     return `<span class="stat verifier-${cls}">${v.passed}/${v.total} checks</span>`;
   }
+  var verifierBanner = null;
+  function keepVerifierLast(container) {
+    if (verifierBanner)
+      container.appendChild(verifierBanner);
+  }
   function renderVerifierBanner(container, trial) {
+    verifierBanner = null;
     const v = trial && trial.verifier;
     if (!v || v.total == null)
       return;
@@ -165,7 +171,8 @@
 ` + lines.join(`
 `);
     }
-    container.prepend(b);
+    verifierBanner = b;
+    container.appendChild(b);
   }
   function textNodeOrBubble(container) {
     const last = container.lastElementChild;
@@ -290,6 +297,7 @@
         const stickToBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 40;
         for (const ev of data.events)
           renderEvent(container, ev);
+        keepVerifierLast(container);
         if (stickToBottom)
           container.scrollTop = container.scrollHeight;
         const tc = document.getElementById("tool-count");
