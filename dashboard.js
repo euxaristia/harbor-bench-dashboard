@@ -423,7 +423,7 @@
     <span class="stat">${escapeHtml(job ? job.model_name || "" : "")}</span>
     <span class="stat" id="tool-count">${toolCount} tool calls</span>
     <span class="stat" id="elapsed-stat">${currentElapsed()}</span>
-    <span class="stat" id="trial-status">${trial ? trial.status : ""}</span>
+    <span class="stat" id="trial-status">${escapeHtml(trial ? trial.status : "")}</span>
     ${verifierStat(trial)}`;
   }
   function verifierStat(trial) {
@@ -431,7 +431,7 @@
     if (!v || v.total == null)
       return "";
     const cls = v.passed === v.total ? "ok" : "bad";
-    return `<span class="stat verifier-${cls}">${v.passed}/${v.total} checks</span>`;
+    return `<span class="stat verifier-${cls}">${escapeHtml(v.passed)}/${escapeHtml(v.total)} checks</span>`;
   }
   var verifierBanner = null;
   function keepVerifierLast(container) {
@@ -527,7 +527,9 @@
     return (s || "").replace(ANSI_PATTERN, "");
   }
   function escapeHtml(s) {
-    return (s || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] || c);
+    if (s == null)
+      return "";
+    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] || c);
   }
   function renderEvent(container, ev) {
     switch (ev.type) {

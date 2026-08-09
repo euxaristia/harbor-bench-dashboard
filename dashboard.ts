@@ -566,7 +566,7 @@ function updateHeader(): void {
     <span class="stat">${escapeHtml(job ? job.model_name || "" : "")}</span>
     <span class="stat" id="tool-count">${toolCount} tool calls</span>
     <span class="stat" id="elapsed-stat">${currentElapsed()}</span>
-    <span class="stat" id="trial-status">${trial ? trial.status : ""}</span>
+    <span class="stat" id="trial-status">${escapeHtml(trial ? trial.status : "")}</span>
     ${verifierStat(trial)}`;
 }
 
@@ -574,7 +574,7 @@ function verifierStat(trial: TrialSummary | undefined): string {
   const v = trial && trial.verifier;
   if (!v || v.total == null) return "";
   const cls = v.passed === v.total ? "ok" : "bad";
-  return `<span class="stat verifier-${cls}">${v.passed}/${v.total} checks</span>`;
+  return `<span class="stat verifier-${cls}">${escapeHtml(v.passed)}/${escapeHtml(v.total)} checks</span>`;
 }
 
 // The verifier banner, kept as a live reference so it can be moved back to
@@ -723,8 +723,9 @@ function stripAnsi(s: string): string {
 // Quotes are escaped too: some of these interpolations land inside an HTML
 // attribute (title="..."), where &lt;/&gt; alone would not stop an attacker
 // closing the attribute.
-function escapeHtml(s: string): string {
-  return (s || "").replace(
+function escapeHtml(s: any): string {
+  if (s == null) return "";
+  return String(s).replace(
     /[&<>"']/g,
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] || c),
   );
