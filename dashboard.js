@@ -12,8 +12,11 @@
   }
   var todayKey = localDateKey(new Date);
   var jobsCache = [];
+  var buildsCache = [];
   var selected = null;
+  var selectedBuild = null;
   var eventsOffset = 0;
+  var buildLogOffset = 0;
   var toolQueues = {};
   var eventsTimer = null;
   var toolCount = 0;
@@ -22,48 +25,98 @@
     const s = Math.max(0, Math.round(seconds));
     return `${Math.floor(s / 60)}m ${s % 60}s`;
   }
-  function currentElapsed() {
-    if (!selected)
-      return "";
-    const job = jobsCache.find((j) => j.name === selected.job);
-    const trial = job && job.trials.find((t) => t.name === selected.trial);
-    if (!trial || trial.started_at == null)
+  var hideJunkRuns = true;
+  function isJunkJob(job) {
+    if (job.status === "running")
+      return false;
+    if (job.trials.some((t) => t.status === "running"))
+      return false;
+    const completed = job.n_completed ?? 0;
+    if (completed > 0)
+      return false;
+    const hasPass = job.trials.some((t) => t.reward != null && t.reward > 0);
+    if (hasPass)
+      return false;
+    return true;
+  }
+  function trialDotClass(trial) {
+    if (trial.status === "errored")
+      return "errored";
+    if (trial.reward != null && trial.reward <= 0)
+      return "errored";
+    if (trial.exception)
+      return "errored";
+    return trial.status;
+  }
+  function trialSortPriority(trial) {
+    if (trial.status === "running")
+      return 0;
+    if (trial.reward != null && trial.reward > 0)
+      return 1;
+    if (trial.status === "stalled")
+      return 3;
+    return 2;
+  }
+  function trialElapsed(trial) {
+    if (trial.started_at == null)
       return "";
     const endpoint = trial.status === "running" ? Date.now() / 1000 : trial.last_activity_at ?? trial.started_at;
     return fmtDuration(endpoint - trial.started_at);
   }
+  function currentElapsed() {
+    if (!selected || !selected.trial)
+      return "";
+    const job = jobsCache.find((j) => j.name === selected.job);
+    const trial = job && job.trials.find((t) => t.name === selected.trial);
+    if (!trial)
+      return "";
+    return trialElapsed(trial);
+  }
   async function pollJobs() {
     try {
-      const res = await fetch("/api/jobs");
-      jobsCache = await res.json();
+      const [jobsResponse, buildsResponse] = await Promise.all([
+        fetch("/api/jobs"),
+        fetch("/api/builds")
+      ]);
+      jobsCache = await jobsResponse.json();
+      buildsCache = await buildsResponse.json();
       renderSidebar();
       if (selected) {
-        const job = jobsCache.find((j) => j.name === selected.job);
-        const trial = job && job.trials.find((t) => t.name === selected.trial);
-        const statusEl = document.getElementById("trial-status");
-        if (statusEl && trial)
-          statusEl.textContent = trial.status;
+        if (selected.trial) {
+          const job = jobsCache.find((j) => j.name === selected.job);
+          const trial = job && job.trials.find((t) => t.name === selected.trial);
+          const statusEl = document.getElementById("trial-status");
+          if (statusEl && trial)
+            statusEl.textContent = trial.status;
+        } else {
+          renderJobOverview(selected.job, { preserveScroll: true });
+        }
       }
-      if (!selected && jobsCache.length) {
-        const job = jobsCache[0];
-        const trial = job.trials.find((t) => t.status === "running") ?? job.trials[0];
-        if (trial)
-          selectTrial(job.name, trial.name);
+      if (selectedBuild)
+        updateBuildHeader();
+      if (!selected && !selectedBuild) {
+        const runningBuild = buildsCache.find((build) => build.status === "running");
+        if (runningBuild) {
+          selectBuild(runningBuild.name);
+          return;
+        }
+      }
+      if (!selected && !selectedBuild && jobsCache.length) {
+        selectJob(jobsCache[0].name);
       }
     } catch {}
   }
   function jobProgress(job) {
     if (job.n_completed == null || job.n_total == null)
       return "";
-    let s = ` &middot; ${job.n_completed}/${job.n_total} done`;
+    let s = job.status === "running" ? ` &middot; ${job.n_completed}/${job.n_total} done` : "";
     const scored = job.trials.filter((t) => t.reward != null);
+    const unfinished = job.n_total - job.n_completed - (job.n_errored || 0);
     if (scored.length) {
       const passed = scored.filter((t) => (t.reward || 0) > 0).length;
-      const pct = Math.round(passed / scored.length * 100);
       const cls = passed > 0 ? "verifier-ok" : "verifier-bad";
-      s += ` &middot; <span class="${cls}">${pct}% pass</span>`;
+      s += ` &middot; <span class="${cls}">passed ${passed}/${scored.length}</span>`;
     }
-    const unfinished = job.n_total - job.n_completed - (job.n_errored || 0);
     if (unfinished > 0 && job.status !== "running") {
       s += ` &middot; <span class="verifier-bad">${unfinished} unfinished</span>`;
     }
@@ -74,9 +127,44 @@
   function renderSidebar() {
     const el = byId("sidebar");
     el.innerHTML = "";
+    const junkCount = jobsCache.filter(isJunkJob).length;
+    const visibleJobs = jobsCache.filter((j) => !hideJunkRuns || !isJunkJob(j));
+    const filterBar = document.createElement("div");
+    filterBar.className = "sidebar-filter";
+    filterBar.innerHTML = `<label><input type="checkbox" id="hide-junk-toggle" ${hideJunkRuns ? "checked" : ""} /> Hide empty runs</label>
+    <span class="junk-count">${junkCount ? `(${junkCount} hidden)` : ""}</span>`;
+    const toggleInput = filterBar.querySelector("#hide-junk-toggle");
+    if (toggleInput) {
+      toggleInput.onchange = () => {
+        hideJunkRuns = toggleInput.checked;
+        renderSidebar();
+      };
+    }
+    el.appendChild(filterBar);
+    if (buildsCache.length) {
+      const buildsGroup = document.createElement("details");
+      buildsGroup.className = "date-group";
+      buildsGroup.open = true;
+      const summary = document.createElement("summary");
+      summary.className = "date-head";
+      summary.textContent = `Builds — ${buildsCache.length}`;
+      buildsGroup.appendChild(summary);
+      for (const build of buildsCache) {
+        const row = document.createElement("div");
+        row.className = "trial" + (selectedBuild === build.name ? " selected" : "");
+        const dotClass = build.status === "failed" ? "errored" : build.status === "succeeded" ? "done" : "running";
+        const detail = build.status === "running" ? build.phase : build.status;
+        row.innerHTML = `<span class="dot ${dotClass}"></span>
+        <span class="tname" title="${escapeHtml(build.name)}">${escapeHtml(build.name)}</span>
+        <span class="reward">${escapeHtml(detail)}</span>`;
+        row.onclick = () => selectBuild(build.name);
+        buildsGroup.appendChild(row);
+      }
+      el.appendChild(buildsGroup);
+    }
     const groups = [];
     const byDate = new Map;
-    for (const job of jobsCache) {
+    for (const job of visibleJobs) {
       const key = job.date || "unknown";
       let group = byDate.get(key);
       if (!group) {
@@ -106,27 +194,56 @@
         const jobEl = document.createElement("div");
         jobEl.className = "job";
         const head = document.createElement("div");
-        head.className = "job-head";
+        const jobSelected = selected && selected.job === job.name && selected.trial == null;
+        head.className = "job-head" + (jobSelected ? " selected" : "");
         head.innerHTML = `<div class="name">${escapeHtml(job.name)}</div>
         <div class="meta">${escapeHtml(job.model_name || "")} &middot; ${escapeHtml(job.status)}
         ${jobProgress(job)}</div>`;
+        head.onclick = () => selectJob(job.name);
         jobEl.appendChild(head);
-        for (const trial of job.trials) {
+        if (job.trials.length === 0 && job.status === "running") {
           const t = document.createElement("div");
-          t.className = "trial" + (selected && selected.job === job.name && selected.trial === trial.name ? " selected" : "");
-          const rewardText = trial.reward != null ? `reward ${trial.reward}` : "";
-          t.innerHTML = `<span class="dot ${trial.status}"></span>
-          <span class="tname" title="${escapeHtml(trial.name)}">${escapeHtml(trial.name)}</span>
-          <span class="reward">${rewardText}</span>`;
-          t.onclick = () => selectTrial(job.name, trial.name);
+          t.className = "trial starting";
+          t.innerHTML = `<span class="dot running"></span>
+          <span class="tname" style="font-style: italic; color: var(--accent)">Starting trial...</span>`;
           jobEl.appendChild(t);
+        } else {
+          const sortedTrials = [...job.trials].sort((a, b) => trialSortPriority(a) - trialSortPriority(b));
+          for (const trial of sortedTrials) {
+            const t = document.createElement("div");
+            t.className = "trial" + (selected && selected.job === job.name && selected.trial === trial.name ? " selected" : "");
+            let rewardText = trial.reward != null ? `reward ${trial.reward}` : "";
+            if (!rewardText && trial.status === "running") {
+              rewardText = trial.agent_bytes > 0 ? "running..." : "starting...";
+            }
+            const dotClass = trialDotClass(trial);
+            t.innerHTML = `<span class="dot ${dotClass}"></span>
+            <span class="tname" title="${escapeHtml(trial.name)}">${escapeHtml(trial.name)}</span>
+            <span class="reward">${rewardText}</span>`;
+            t.onclick = () => selectTrial(job.name, trial.name);
+            jobEl.appendChild(t);
+          }
         }
         dateEl.appendChild(jobEl);
       }
       el.appendChild(dateEl);
     }
   }
+  function selectJob(job) {
+    selectedBuild = null;
+    selected = { job, trial: null };
+    eventsOffset = 0;
+    toolQueues = {};
+    toolCount = 0;
+    if (eventsTimer) {
+      clearInterval(eventsTimer);
+      eventsTimer = null;
+    }
+    renderSidebar();
+    renderJobOverview(job);
+  }
   function selectTrial(job, trial) {
+    selectedBuild = null;
     selected = { job, trial };
     eventsOffset = 0;
     toolQueues = {};
@@ -148,8 +265,156 @@
     pollEvents();
     eventsTimer = setInterval(pollEvents, 1200);
   }
+  function buildElapsed(build) {
+    if (build.started_at == null)
+      return "";
+    const endpoint = build.status === "running" ? Date.now() / 1000 : build.finished_at ?? build.started_at;
+    return fmtDuration(endpoint - build.started_at);
+  }
+  function selectBuild(name) {
+    selected = null;
+    selectedBuild = name;
+    buildLogOffset = 0;
+    toolQueues = {};
+    toolCount = 0;
+    if (eventsTimer)
+      clearInterval(eventsTimer);
+    const transcript = byId("transcript");
+    transcript.innerHTML = `<div class="bubble build-log"></div>`;
+    renderSidebar();
+    updateBuildHeader();
+    pollBuildLog();
+    eventsTimer = setInterval(pollBuildLog, 800);
+  }
+  function updateBuildHeader() {
+    if (!selectedBuild)
+      return;
+    const build = buildsCache.find((candidate) => candidate.name === selectedBuild);
+    const header = byId("header");
+    if (!build) {
+      header.innerHTML = `<span class="title">${escapeHtml(selectedBuild)}</span>`;
+      return;
+    }
+    const unit = build.current_unit ? `current ${build.current_unit}` : "waiting for compiler";
+    header.innerHTML = `<span class="title">${escapeHtml(build.name)}</span>
+    <span class="stat">${escapeHtml(build.target)}</span>
+    <span class="stat">${escapeHtml(build.status)}</span>
+    <span class="stat">${escapeHtml(build.phase)}</span>
+    <span class="stat">${build.compiled_units} units</span>
+    <span class="stat">${escapeHtml(unit)}</span>
+    <span class="stat">${buildElapsed(build)}</span>`;
+  }
+  async function pollBuildLog() {
+    if (!selectedBuild)
+      return;
+    try {
+      const response = await fetch(`/api/builds/${encodeURIComponent(selectedBuild)}/log?offset=${buildLogOffset}`);
+      const data = await response.json();
+      buildLogOffset = data.offset;
+      if (data.text) {
+        const transcript = byId("transcript");
+        const log = transcript.querySelector(".build-log");
+        if (log) {
+          const stickToBottom = transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 40;
+          log.textContent += stripAnsi(data.text).replace(/^::phase::.*(?:\r?\n|$)/gm, "");
+          if (stickToBottom)
+            transcript.scrollTop = transcript.scrollHeight;
+        }
+      }
+      updateBuildHeader();
+    } catch {}
+  }
+  function armStats(job) {
+    const byArm = new Map;
+    for (const trial of job.trials) {
+      const arm = trial.agent_name || job.agent_name || "unknown";
+      let row = byArm.get(arm);
+      if (!row) {
+        row = { arm, pass: 0, fail: 0, running: 0, n: 0 };
+        byArm.set(arm, row);
+      }
+      row.n += 1;
+      if (trial.reward != null) {
+        if ((trial.reward || 0) > 0)
+          row.pass += 1;
+        else
+          row.fail += 1;
+      } else if (trial.status === "done" || trial.status === "errored") {
+        row.fail += 1;
+      } else {
+        row.running += 1;
+      }
+    }
+    return [...byArm.values()].sort((a, b) => a.arm.localeCompare(b.arm));
+  }
+  function renderJobOverview(jobName, opts = {}) {
+    if (!selected || selected.job !== jobName || selected.trial != null)
+      return;
+    const job = jobsCache.find((j) => j.name === jobName);
+    const header = byId("header");
+    const transcript = byId("transcript");
+    if (!job) {
+      header.innerHTML = `<span class="title">${escapeHtml(jobName)}</span>`;
+      transcript.innerHTML = `<div class="empty">Job not found.</div>`;
+      return;
+    }
+    const scored = job.trials.filter((t) => t.reward != null);
+    const passed = scored.filter((t) => (t.reward || 0) > 0).length;
+    const running = job.trials.filter((t) => t.status === "running").length;
+    const progress = job.status === "running" ? `<span class="stat">${job.n_completed ?? 0}/${job.n_total ?? job.trials.length} done</span>` : "";
+    header.innerHTML = `<span class="title">${escapeHtml(job.name)}</span>
+    <span class="stat">${escapeHtml(job.model_name || "")}</span>
+    <span class="stat">${escapeHtml(job.status)}</span>
+    ${progress}
+    <span class="stat">passed ${passed}/${scored.length}</span>
+    <span class="stat">click a trial for its transcript</span>`;
+    const scrollTop = opts.preserveScroll ? transcript.scrollTop : 0;
+    const arms = armStats(job);
+    const cards = [
+      `<div class="overview-card"><div class="label">trials</div><div class="value">${job.trials.length}/${job.n_total ?? job.trials.length}</div></div>`,
+      `<div class="overview-card"><div class="label">passed</div><div class="value verifier-ok">${passed}</div></div>`,
+      `<div class="overview-card"><div class="label">failed</div><div class="value ${scored.length - passed ? "verifier-bad" : ""}">${scored.length - passed}</div></div>`,
+      `<div class="overview-card"><div class="label">running</div><div class="value">${running}</div></div>`
+    ];
+    for (const arm of arms) {
+      const done = arm.pass + arm.fail;
+      const rate = done ? `${arm.pass}/${done}` : "—";
+      cards.push(`<div class="overview-card"><div class="label">${escapeHtml(arm.arm)}</div>` + `<div class="value">${rate}` + (arm.running ? ` <span style="color:var(--dim);font-size:12px">+${arm.running} run</span>` : "") + `</div></div>`);
+    }
+    let rows = "";
+    const sortedOverviewTrials = [...job.trials].sort((a, b) => trialSortPriority(a) - trialSortPriority(b));
+    for (const trial of sortedOverviewTrials) {
+      const reward = trial.reward != null ? String(trial.reward) : trial.status === "running" ? "—" : "—";
+      const checks = trial.verifier && trial.verifier.total != null ? `${trial.verifier.passed ?? "?"}/${trial.verifier.total}` : "—";
+      const dotClass = trialDotClass(trial);
+      rows += `<tr data-trial="${escapeHtml(trial.name)}">
+      <td><span class="dot ${dotClass}"></span></td>
+      <td class="tname">${escapeHtml(trial.name)}</td>
+      <td>${escapeHtml(trial.agent_name || "—")}</td>
+      <td>${escapeHtml(trial.status)}</td>
+      <td>${escapeHtml(reward)}</td>
+      <td>${escapeHtml(checks)}</td>
+      <td>${escapeHtml(trialElapsed(trial))}</td>
+    </tr>`;
+    }
+    transcript.innerHTML = `<div class="overview">
+    <div class="overview-summary">${cards.join("")}</div>
+    <table class="overview-table">
+      <thead><tr>
+        <th></th><th>trial</th><th>agent</th><th>status</th><th>reward</th><th>checks</th><th>elapsed</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+    for (const tr of transcript.querySelectorAll("tr[data-trial]")) {
+      const name = tr.dataset.trial;
+      tr.onclick = () => selectTrial(job.name, name);
+    }
+    if (opts.preserveScroll)
+      transcript.scrollTop = scrollTop;
+  }
   function updateHeader() {
-    if (!selected)
+    if (!selected || !selected.trial)
       return;
     const job = jobsCache.find((j) => j.name === selected.job);
     const trial = job && job.trials.find((t) => t.name === selected.trial);
@@ -209,10 +474,20 @@
     if (last && last.classList.contains("bubble"))
       last.dataset.open = "0";
   }
+  function isShellTool(name) {
+    return name === "shell" || name === "python";
+  }
+  function collapsePriorTools(container) {
+    for (const el of container.querySelectorAll("details.tool")) {
+      el.open = false;
+    }
+  }
   function renderToolUse(container, ev) {
+    collapsePriorTools(container);
     const details = document.createElement("details");
     details.className = "tool";
-    details.open = false;
+    details.dataset.toolName = ev.name;
+    details.open = isShellTool(ev.name);
     const summary = document.createElement("summary");
     summary.innerHTML = `${escapeHtml(ev.name)} <span class="badge">running…</span>`;
     const body = document.createElement("div");
@@ -243,6 +518,9 @@
     const resultDiv = document.createElement("div");
     resultDiv.innerHTML = `<div class="section-label">result</div>${escapeHtml(stripAnsi(ev.text || ""))}`;
     body.appendChild(resultDiv);
+    const tools = container.querySelectorAll("details.tool");
+    const isMostRecent = tools.length > 0 && tools[tools.length - 1] === details;
+    details.open = isMostRecent && isShellTool(ev.name);
   }
   var ANSI_PATTERN = /\u001B\[[0-9;?]*[ -\/]*[@-~]|\u001B\][^\u0007]*\u0007/g;
   function stripAnsi(s) {
@@ -302,7 +580,7 @@
     }
   }
   async function pollEvents() {
-    if (!selected)
+    if (!selected || !selected.trial)
       return;
     try {
       const res = await fetch(`/api/jobs/${selected.job}/trials/${selected.trial}/events?offset=${eventsOffset}`);

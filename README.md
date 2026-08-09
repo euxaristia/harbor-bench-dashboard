@@ -5,27 +5,39 @@ benchmark jobs as they run, instead of reading `jobs/<name>/*/agent/*.txt`
 by hand or waiting for the run to finish before you find out it looped for
 an hour.
 
-The server (`dashboard.py`) is standard-library Python, nothing to install
-to run it. It reads the `jobs/` directory Harbor already writes to and
+The server (`main.go`) is a dependency-free Go program. It reads the
+`jobs/` directory Harbor already writes to and
 serves a page that polls for updates, so it works with a run started any
 way at all (this script, a bare `harbor run`, a cron job) as long as it
 points at the same jobs directory.
 
 The client (`dashboard.ts`) is TypeScript, compiled ahead of time with
 [bun](https://bun.sh) to the `dashboard.js` this repo ships. You only need
-bun if you're editing the client; running the server needs nothing beyond
-Python.
+bun if you're editing the client.
 
 ## Usage
 
 ```bash
-python dashboard.py --jobs-dir jobs --port 8787
+go run . --jobs-dir jobs --builds-dir builds --port 8787
+```
+
+Or build a standalone executable once:
+
+```bash
+go build .
+./harbor-bench-dashboard --jobs-dir jobs --builds-dir builds --port 8787
 ```
 
 Then open `http://127.0.0.1:8787/`. The sidebar groups jobs by calendar
 date, today expanded and every other day collapsed one click away, newest
 job first within each day, and auto-selects the most recent trial. Clicking
 a trial streams its transcript live.
+
+`--builds-dir` is optional. By default the dashboard watches a `builds/`
+directory beside the selected `jobs/` directory. A build appears as soon as
+its producer creates `<build>/meta.json`; `<build>/build.log` is streamed into
+the detail pane, with the current phase, crate, compiled-unit count, status,
+and elapsed time kept live in the header.
 
 Binds to `127.0.0.1` only.
 
@@ -52,6 +64,8 @@ the one way to make the two drift.
   duration that stops too.
 - **Reward**, once the verifier writes one.
 - **A live transcript**, if the trial's agent log is newline-delimited JSON.
+- **Live build output**, including phase changes and each Cargo compile line,
+  when a build publishes `meta.json` and `build.log` in the builds directory.
 
 ## The transcript schema
 
