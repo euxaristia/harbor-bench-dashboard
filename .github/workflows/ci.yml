@@ -30,10 +30,20 @@ jobs:
             exit 1
           fi
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
-          python-version: "3.11"
+          go-version-file: go.mod
+          cache: false
 
-      - name: Syntax-check the server
-        run: python -m py_compile dashboard.py
+      - name: Check Go formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet the server
+        run: go vet ./...
+
+      - name: Test the server
+        run: go test -race ./...
+
+      - name: Build the server
+        run: go build .
