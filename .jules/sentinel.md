@@ -1,0 +1,4 @@
+## 2026-08-12 - [DOM XSS in Verifier Summary Banner]
+**Vulnerability:** Found a DOM Cross-Site Scripting (XSS) vulnerability in `dashboard.ts`. The `verifierStat` function dynamically interpolated the `v.passed` and `v.total` values directly into the `.innerHTML` of a span element without escaping them. Since these values are parsed from external `ctrf.json` log files produced by external agents or test suites, an attacker manipulating the test result logs could inject malicious HTML.
+**Learning:** Even internal dashboards watching externally produced static files (like agent run logs) are susceptible to XSS if they blindly trust the contents.
+**Prevention:** Always use HTML escaping functions like `escapeHtml` even when dealing with seemingly harmless values like "passed" and "total" counters, especially if they are derived from untrusted inputs or dynamically generated JSON logs. Ensure sanitization utilities are robust enough to handle unexpected input types.

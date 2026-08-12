@@ -431,7 +431,7 @@
     if (!v || v.total == null)
       return "";
     const cls = v.passed === v.total ? "ok" : "bad";
-    return `<span class="stat verifier-${cls}">${v.passed}/${v.total} checks</span>`;
+    return `<span class="stat verifier-${cls}">${escapeHtml(String(v.passed ?? ""))}/${escapeHtml(String(v.total ?? ""))} checks</span>`;
   }
   var verifierBanner = null;
   function keepVerifierLast(container) {
@@ -524,10 +524,10 @@
   }
   var ANSI_PATTERN = /\u001B\[[0-9;?]*[ -\/]*[@-~]|\u001B\][^\u0007]*\u0007/g;
   function stripAnsi(s) {
-    return (s || "").replace(ANSI_PATTERN, "");
+    return String(s ?? "").replace(ANSI_PATTERN, "");
   }
   function escapeHtml(s) {
-    return (s || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] || c);
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] || c);
   }
   function renderEvent(container, ev) {
     switch (ev.type) {

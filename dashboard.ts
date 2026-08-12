@@ -574,7 +574,7 @@ function verifierStat(trial: TrialSummary | undefined): string {
   const v = trial && trial.verifier;
   if (!v || v.total == null) return "";
   const cls = v.passed === v.total ? "ok" : "bad";
-  return `<span class="stat verifier-${cls}">${v.passed}/${v.total} checks</span>`;
+  return `<span class="stat verifier-${cls}">${escapeHtml(String(v.passed ?? ""))}/${escapeHtml(String(v.total ?? ""))} checks</span>`;
 }
 
 // The verifier banner, kept as a live reference so it can be moved back to
@@ -709,8 +709,8 @@ function renderToolResult(container: HTMLElement, ev: BenchToolResultEvent): voi
 const ANSI_PATTERN =
   /\u001B\[[0-9;?]*[ -\/]*[@-~]|\u001B\][^\u0007]*\u0007/g;
 
-function stripAnsi(s: string): string {
-  return (s || "").replace(ANSI_PATTERN, "");
+function stripAnsi(s: any): string {
+  return String(s ?? "").replace(ANSI_PATTERN, "");
 }
 
 // Everything rendered here comes from an agent's log: model-authored prose,
@@ -723,8 +723,8 @@ function stripAnsi(s: string): string {
 // Quotes are escaped too: some of these interpolations land inside an HTML
 // attribute (title="..."), where &lt;/&gt; alone would not stop an attacker
 // closing the attribute.
-function escapeHtml(s: string): string {
-  return (s || "").replace(
+function escapeHtml(s: any): string {
+  return String(s ?? "").replace(
     /[&<>"']/g,
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] || c),
   );
