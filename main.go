@@ -636,6 +636,11 @@ func renderIndex() []byte {
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// SECURITY: Add standard security headers to prevent XSS and clickjacking
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'")
+
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -721,7 +726,18 @@ func main() {
 	handler := &server{jobsDir: jobs, buildsDir: builds}
 	address := fmt.Sprintf("127.0.0.1:%d", *port)
 	fmt.Printf("watching %s\nwatching builds in %s\ndashboard: http://%s/\n", jobs, builds, address)
-	if err := http.ListenAndServe(address, handler); err != nil {
+
+	// SECURITY: Use explicit server with timeouts to prevent resource exhaustion/Slowloris
+	srv := &http.Server{
+		Addr:              address,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	if err := srv.ListenAndServe(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
