@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"embed"
 	"encoding/json"
@@ -41,6 +42,44 @@ type verifierSummary struct {
 	Failures []verifierFailure `json:"failures"`
 }
 
+type usageSummary struct {
+	InputTokens       uint64  `json:"input_tokens"`
+	OutputTokens      uint64  `json:"output_tokens"`
+	TotalTokens       uint64  `json:"total_tokens"`
+	CacheReadTokens   uint64  `json:"cache_read_tokens"`
+	CacheCreateTokens uint64  `json:"cache_create_tokens"`
+	CacheMissTokens   uint64  `json:"cache_miss_tokens"`
+	EstimatedCostUSD  float64 `json:"estimated_cost_usd"`
+}
+
+func (u *usageSummary) add(other usageSummary) {
+	u.InputTokens += other.InputTokens
+	u.OutputTokens += other.OutputTokens
+	u.TotalTokens += other.TotalTokens
+	u.CacheReadTokens += other.CacheReadTokens
+	u.CacheCreateTokens += other.CacheCreateTokens
+	u.CacheMissTokens += other.CacheMissTokens
+	u.EstimatedCostUSD += other.EstimatedCostUSD
+}
+
+func estimateUsageCost(model string, usage usageSummary) float64 {
+	if slash := strings.LastIndex(model, "/"); slash >= 0 {
+		model = model[slash+1:]
+	}
+	if colon := strings.LastIndex(model, ":"); colon >= 0 {
+		model = model[:colon]
+	}
+	if model != "gpt-5.6-terra" {
+		return usage.EstimatedCostUSD
+	}
+	uncached := usage.InputTokens
+	if usage.CacheReadTokens < uncached {
+		uncached -= usage.CacheReadTokens
+	}
+	return (float64(uncached)*2.0 + float64(usage.CacheReadTokens)*0.20 +
+		float64(usage.CacheCreateTokens)*2.50 + float64(usage.OutputTokens)*12.0) / 1_000_000.0
+}
+
 type trialSummary struct {
 	Name            string           `json:"name"`
 	Status          string           `json:"status"`
@@ -52,6 +91,7 @@ type trialSummary struct {
 	Exception       any              `json:"exception"`
 	StartedAt       *float64         `json:"started_at"`
 	LastActivityAt  *float64         `json:"last_activity_at"`
+	Usage           usageSummary     `json:"usage"`
 	Result          any              `json:"result,omitempty"`
 	VerifierDetails any              `json:"verifier_summary,omitempty"`
 }
@@ -69,7 +109,54 @@ type jobSummary struct {
 	Errored    int            `json:"n_errored"`
 	Total      int            `json:"n_total"`
 	Trials     []trialSummary `json:"trials"`
+	Usage      usageSummary   `json:"usage"`
 	started    float64
+}
+
+func usageFromAgentFile(path string) usageSummary {
+	file, err := os.Open(path)
+	if err != nil {
+		return usageSummary{}
+	}
+	defer file.Close()
+
+	type usageEvent struct {
+		Type              string  `json:"type"`
+		InputTokens       uint64  `json:"inputTokens"`
+		OutputTokens      uint64  `json:"outputTokens"`
+		TotalTokens       uint64  `json:"totalTokens"`
+		CacheReadTokens   uint64  `json:"cacheReadTokens"`
+		CacheCreateTokens uint64  `json:"cacheCreateTokens"`
+		CacheMissTokens   uint64  `json:"cacheMissTokens"`
+		EstimatedCostUSD  float64 `json:"estimatedCostUsd"`
+	}
+
+	reader := bufio.NewReader(file)
+	var live usageSummary
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if bytes.Contains(line, []byte(`"type":"usage"`)) || bytes.Contains(line, []byte(`"type":"run_end"`)) {
+			var event usageEvent
+			if json.Unmarshal(bytes.TrimSpace(line), &event) == nil {
+				usage := usageSummary{
+					InputTokens: event.InputTokens, OutputTokens: event.OutputTokens,
+					TotalTokens: event.TotalTokens, CacheReadTokens: event.CacheReadTokens,
+					CacheCreateTokens: event.CacheCreateTokens, CacheMissTokens: event.CacheMissTokens,
+					EstimatedCostUSD: event.EstimatedCostUSD,
+				}
+				if event.Type == "run_end" {
+					return usage
+				}
+				if event.Type == "usage" {
+					live.add(usage)
+				}
+			}
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	return live
 }
 
 type buildSummary struct {
@@ -294,11 +381,21 @@ func summarizeTrial(trialDir string) trialSummary {
 	started := modTime(filepath.Join(trialDir, "lock.json"))
 	activity := lastActivity(trialDir)
 	stale := activity != nil && time.Since(time.Unix(0, int64(*activity*1e9))) > staleAfter
+	_, exceptionErr := os.Stat(exceptionPath)
+	hasException := exceptionErr == nil
 	status := "running"
-	if result != nil || reward != nil {
-		status = "done"
-	} else if _, err := os.Stat(exceptionPath); err == nil {
+	if hasException && size == 0 {
+		status = "stalled"
+	} else if hasException {
 		status = "errored"
+	} else if reward != nil {
+		status = "done"
+	} else if result != nil {
+		if result["agent_result"] != nil || result["verifier_result"] != nil {
+			status = "done"
+		} else {
+			status = "stalled"
+		}
 	} else if stale && !inFlightToolCall(files, activity) {
 		status = "stalled"
 	}
@@ -312,11 +409,13 @@ func summarizeTrial(trialDir string) trialSummary {
 		}
 	}
 	var agentFile any
+	usage := usageSummary{}
 	if len(files) > 0 {
 		agentFile = filepath.Base(files[0])
+		usage = usageFromAgentFile(files[0])
 	}
 	var exception any
-	if status == "errored" {
+	if hasException {
 		if text := readText(exceptionPath); text != nil {
 			exception = *text
 		}
@@ -324,7 +423,7 @@ func summarizeTrial(trialDir string) trialSummary {
 	return trialSummary{
 		Name: filepath.Base(trialDir), Status: status, Verifier: verifierFor(trialDir), AgentName: agentName,
 		AgentFile: agentFile, AgentBytes: size, Reward: reward, Exception: exception,
-		StartedAt: started, LastActivityAt: activity,
+		StartedAt: started, LastActivityAt: activity, Usage: usage,
 	}
 }
 
@@ -440,7 +539,13 @@ func summarizeJob(jobDir string) jobSummary {
 		}
 	}
 	completed, errored := 0, 0
-	for _, trial := range trials {
+	usage := usageSummary{}
+	for index := range trials {
+		trial := &trials[index]
+		if trial.Usage.EstimatedCostUSD == 0 {
+			trial.Usage.EstimatedCostUSD = estimateUsageCost(stringValue(modelName, ""), trial.Usage)
+		}
+		usage.add(trial.Usage)
 		if trial.Status == "done" {
 			completed++
 		}
@@ -460,7 +565,7 @@ func summarizeJob(jobDir string) jobSummary {
 	return jobSummary{
 		Name: filepath.Base(jobDir), Date: date, Status: status, AgentName: agentName, ModelName: modelName,
 		TaskNames: taskNames, StartedAt: result["started_at"], FinishedAt: result["finished_at"],
-		Completed: completed, Errored: errored, Total: total, Trials: trials, started: started,
+		Completed: completed, Errored: errored, Total: total, Trials: trials, Usage: usage, started: started,
 	}
 }
 
@@ -585,9 +690,20 @@ func tailEvents(trialDir string, offset int64) object {
 	if len(files) == 0 {
 		return object{"events": []any{}, "offset": 0}
 	}
+	truncated := false
+	if offset == 0 {
+		if info, err := os.Stat(files[0]); err == nil && info.Size() > 512*1024 {
+			offset = info.Size() - 512*1024
+			truncated = true
+		}
+	}
 	text, next := tailFile(files[0], offset, true)
+	lines := strings.Split(text, "\n")
+	if truncated && len(lines) > 0 {
+		lines = lines[1:]
+	}
 	events := make([]any, 0)
-	for _, line := range strings.Split(text, "\n") {
+	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -598,7 +714,7 @@ func tailEvents(trialDir string, offset int64) object {
 		}
 		events = append(events, event)
 	}
-	return object{"events": events, "offset": next}
+	return object{"events": events, "offset": next, "truncated": truncated}
 }
 
 func (s *server) cachedJobs(includeJunk bool) []jobSummary {

@@ -10,22 +10,69 @@
     const p = (n) => String(n).padStart(2, "0");
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   }
+  function compactNumber(value) {
+    return Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value || 0);
+  }
+  function formatCost(value) {
+    if (!value)
+      return "$0";
+    return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
+  }
+  function usageText(usage) {
+    if (!usage)
+      return "0 tokens · $0";
+    return `${compactNumber(usage.total_tokens)} tokens · ${formatCost(usage.estimated_cost_usd)}`;
+  }
   var todayKey = localDateKey(new Date);
+  var stateKey = "harbor-bench-dashboard-state-v1";
+  function loadPersistedState() {
+    try {
+      const value = JSON.parse(localStorage.getItem(stateKey) || "{}");
+      return value && typeof value === "object" ? value : {};
+    } catch {
+      return {};
+    }
+  }
+  var persistedState = loadPersistedState();
+  var persistedSelection = persistedState.selected;
+  var initialSelected = persistedSelection && typeof persistedSelection.job === "string" && (typeof persistedSelection.trial === "string" || persistedSelection.trial === null) ? persistedSelection : null;
   var jobsCache = [];
   var buildsCache = [];
-  var selected = null;
-  var selectedBuild = null;
+  var selected = initialSelected;
+  var selectedBuild = typeof persistedState.selectedBuild === "string" ? persistedState.selectedBuild : null;
   var eventsOffset = 0;
   var buildLogOffset = 0;
   var toolQueues = {};
   var eventsTimer = null;
   var toolCount = 0;
-  var expandedDates = new Set([todayKey]);
+  var modelTextByBubble = new WeakMap;
+  var maxModelBubbleChars = 32000;
+  var maxToolTextChars = 16000;
+  var sidebarVisible = typeof persistedState.sidebarVisible === "boolean" ? persistedState.sidebarVisible : true;
+  var explorerContextVisible = false;
+  var fileExplorerVisible = typeof persistedState.fileExplorerVisible === "boolean" ? persistedState.fileExplorerVisible : true;
+  var buildsExpanded = typeof persistedState.buildsExpanded === "boolean" ? persistedState.buildsExpanded : true;
+  var editedFiles = new Map;
+  var expandedDates = new Set(Array.isArray(persistedState.expandedDates) ? persistedState.expandedDates.filter((date) => typeof date === "string") : [todayKey]);
   function fmtDuration(seconds) {
     const s = Math.max(0, Math.round(seconds));
     return `${Math.floor(s / 60)}m ${s % 60}s`;
   }
-  var hideJunkRuns = true;
+  var hideJunkRuns = typeof persistedState.hideJunkRuns === "boolean" ? persistedState.hideJunkRuns : true;
+  var persistedSelectionApplied = false;
+  function savePersistedState() {
+    try {
+      localStorage.setItem(stateKey, JSON.stringify({
+        selected,
+        selectedBuild,
+        sidebarVisible,
+        fileExplorerVisible,
+        buildsExpanded,
+        expandedDates: [...expandedDates],
+        hideJunkRuns
+      }));
+    } catch {}
+  }
   function isJunkJob(job) {
     if (job.status === "running")
       return false;
@@ -40,6 +87,8 @@
     return true;
   }
   function trialDotClass(trial) {
+    if (trial.status === "stalled")
+      return "stalled";
     if (trial.status === "errored")
       return "errored";
     if (trial.reward != null && trial.reward <= 0)
@@ -80,6 +129,39 @@
       ]);
       jobsCache = await jobsResponse.json();
       buildsCache = await buildsResponse.json();
+      let clearedMissingSelection = false;
+      if (selectedBuild && !buildsCache.some((build) => build.name === selectedBuild)) {
+        selectedBuild = null;
+        clearedMissingSelection = true;
+      }
+      if (selected) {
+        const job = jobsCache.find((candidate) => candidate.name === selected.job);
+        const trialExists = selected.trial === null || job?.trials.some((trial) => trial.name === selected.trial);
+        if (!job || !trialExists) {
+          selected = null;
+          clearedMissingSelection = true;
+        }
+      }
+      if (selected && selectedBuild) {
+        selected = null;
+        clearedMissingSelection = true;
+      }
+      if (clearedMissingSelection)
+        savePersistedState();
+      if (!persistedSelectionApplied) {
+        persistedSelectionApplied = true;
+        if (selectedBuild) {
+          selectBuild(selectedBuild);
+          return;
+        }
+        if (selected) {
+          if (selected.trial)
+            selectTrial(selected.job, selected.trial);
+          else
+            selectJob(selected.job);
+          return;
+        }
+      }
       renderSidebar();
       if (selected) {
         if (selected.trial) {
@@ -88,6 +170,9 @@
           const statusEl = document.getElementById("trial-status");
           if (statusEl && trial)
             statusEl.textContent = trial.status;
+          const usageEl = document.getElementById("trial-usage");
+          if (usageEl && trial)
+            usageEl.textContent = usageText(trial.usage);
         } else {
           renderJobOverview(selected.job, { preserveScroll: true });
         }
@@ -110,8 +195,9 @@
     if (job.n_completed == null || job.n_total == null)
       return "";
     let s = job.status === "running" ? ` &middot; ${job.n_completed}/${job.n_total} done` : "";
-    const scored = job.trials.filter((t) => t.reward != null);
-    const unfinished = job.n_total - job.n_completed - (job.n_errored || 0);
+    const scored = job.trials.filter((t) => t.status !== "running");
+    const stalled = job.trials.filter((t) => t.status === "stalled").length;
+    const unfinished = job.n_total - job.n_completed - (job.n_errored || 0) - stalled;
     if (scored.length) {
       const passed = scored.filter((t) => (t.reward || 0) > 0).length;
       const cls = passed > 0 ? "verifier-ok" : "verifier-bad";
@@ -120,6 +206,8 @@
     if (unfinished > 0 && job.status !== "running") {
       s += ` &middot; <span class="verifier-bad">${unfinished} unfinished</span>`;
     }
+    if (stalled > 0)
+      s += ` &middot; ${stalled} stalled`;
     if (job.n_errored)
       s += ` &middot; ${job.n_errored} errored`;
     return s;
@@ -137,6 +225,7 @@
     if (toggleInput) {
       toggleInput.onchange = () => {
         hideJunkRuns = toggleInput.checked;
+        savePersistedState();
         renderSidebar();
       };
     }
@@ -144,7 +233,11 @@
     if (buildsCache.length) {
       const buildsGroup = document.createElement("details");
       buildsGroup.className = "date-group";
-      buildsGroup.open = true;
+      buildsGroup.open = buildsExpanded;
+      buildsGroup.ontoggle = () => {
+        buildsExpanded = buildsGroup.open;
+        savePersistedState();
+      };
       const summary = document.createElement("summary");
       summary.className = "date-head";
       summary.textContent = `Builds — ${buildsCache.length}`;
@@ -184,6 +277,7 @@
           expandedDates.add(group.date);
         else
           expandedDates.delete(group.date);
+        savePersistedState();
       };
       const dateSummary = document.createElement("summary");
       dateSummary.className = "date-head";
@@ -198,7 +292,7 @@
         head.className = "job-head" + (jobSelected ? " selected" : "");
         head.innerHTML = `<div class="name">${escapeHtml(job.name)}</div>
         <div class="meta">${escapeHtml(job.model_name || "")} &middot; ${escapeHtml(job.status)}
-        ${jobProgress(job)}</div>`;
+        ${jobProgress(job)} &middot; ${escapeHtml(usageText(job.usage))}</div>`;
         head.onclick = () => selectJob(job.name);
         jobEl.appendChild(head);
         if (job.trials.length === 0 && job.status === "running") {
@@ -232,9 +326,11 @@
   function selectJob(job) {
     selectedBuild = null;
     selected = { job, trial: null };
+    savePersistedState();
     eventsOffset = 0;
     toolQueues = {};
     toolCount = 0;
+    resetFileExplorer(false);
     if (eventsTimer) {
       clearInterval(eventsTimer);
       eventsTimer = null;
@@ -245,9 +341,11 @@
   function selectTrial(job, trial) {
     selectedBuild = null;
     selected = { job, trial };
+    savePersistedState();
     eventsOffset = 0;
     toolQueues = {};
     toolCount = 0;
+    resetFileExplorer(true);
     const jobData = jobsCache.find((j) => j.name === job);
     const trialData = jobData && jobData.trials.find((t) => t.name === trial);
     const transcript = byId("transcript");
@@ -274,9 +372,11 @@
   function selectBuild(name) {
     selected = null;
     selectedBuild = name;
+    savePersistedState();
     buildLogOffset = 0;
     toolQueues = {};
     toolCount = 0;
+    resetFileExplorer(false);
     if (eventsTimer)
       clearInterval(eventsTimer);
     const transcript = byId("transcript");
@@ -339,7 +439,7 @@
           row.pass += 1;
         else
           row.fail += 1;
-      } else if (trial.status === "done" || trial.status === "errored") {
+      } else if (trial.status !== "running") {
         row.fail += 1;
       } else {
         row.running += 1;
@@ -358,7 +458,7 @@
       transcript.innerHTML = `<div class="empty">Job not found.</div>`;
       return;
     }
-    const scored = job.trials.filter((t) => t.reward != null);
+    const scored = job.trials.filter((t) => t.status !== "running");
     const passed = scored.filter((t) => (t.reward || 0) > 0).length;
     const running = job.trials.filter((t) => t.status === "running").length;
     const progress = job.status === "running" ? `<span class="stat">${job.n_completed ?? 0}/${job.n_total ?? job.trials.length} done</span>` : "";
@@ -367,6 +467,7 @@
     <span class="stat">${escapeHtml(job.status)}</span>
     ${progress}
     <span class="stat">passed ${passed}/${scored.length}</span>
+    <span class="stat">${escapeHtml(usageText(job.usage))}</span>
     <span class="stat">click a trial for its transcript</span>`;
     const scrollTop = opts.preserveScroll ? transcript.scrollTop : 0;
     const arms = armStats(job);
@@ -374,7 +475,10 @@
       `<div class="overview-card"><div class="label">trials</div><div class="value">${job.trials.length}/${job.n_total ?? job.trials.length}</div></div>`,
       `<div class="overview-card"><div class="label">passed</div><div class="value verifier-ok">${passed}</div></div>`,
       `<div class="overview-card"><div class="label">failed</div><div class="value ${scored.length - passed ? "verifier-bad" : ""}">${scored.length - passed}</div></div>`,
-      `<div class="overview-card"><div class="label">running</div><div class="value">${running}</div></div>`
+      `<div class="overview-card"><div class="label">running</div><div class="value">${running}</div></div>`,
+      `<div class="overview-card"><div class="label">tokens</div><div class="value">${compactNumber(job.usage.total_tokens)}</div></div>`,
+      `<div class="overview-card"><div class="label">cached input</div><div class="value">${compactNumber(job.usage.cache_read_tokens)}</div></div>`,
+      `<div class="overview-card"><div class="label">estimated cost</div><div class="value">${formatCost(job.usage.estimated_cost_usd)}</div></div>`
     ];
     for (const arm of arms) {
       const done = arm.pass + arm.fail;
@@ -394,6 +498,8 @@
       <td>${escapeHtml(trial.status)}</td>
       <td>${escapeHtml(reward)}</td>
       <td>${escapeHtml(checks)}</td>
+      <td title="${trial.usage.input_tokens} input, ${trial.usage.cache_read_tokens} cached, ${trial.usage.output_tokens} output">${compactNumber(trial.usage.total_tokens)}</td>
+      <td>${formatCost(trial.usage.estimated_cost_usd)}</td>
       <td>${escapeHtml(trialElapsed(trial))}</td>
     </tr>`;
     }
@@ -401,7 +507,7 @@
     <div class="overview-summary">${cards.join("")}</div>
     <table class="overview-table">
       <thead><tr>
-        <th></th><th>trial</th><th>agent</th><th>status</th><th>reward</th><th>checks</th><th>elapsed</th>
+        <th></th><th>trial</th><th>agent</th><th>status</th><th>reward</th><th>checks</th><th>tokens</th><th>cost</th><th>elapsed</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>
@@ -424,6 +530,7 @@
     <span class="stat" id="tool-count">${toolCount} tool calls</span>
     <span class="stat" id="elapsed-stat">${currentElapsed()}</span>
     <span class="stat" id="trial-status">${trial ? trial.status : ""}</span>
+    <span class="stat" id="trial-usage">${escapeHtml(usageText(trial?.usage))}</span>
     ${verifierStat(trial)}`;
   }
   function verifierStat(trial) {
@@ -469,6 +576,13 @@
     container.appendChild(div);
     return div;
   }
+  function boundedTail(text, limit) {
+    if (text.length <= limit)
+      return text;
+    return `[Earlier output omitted from the live view. Full output remains on disk.]
+
+${text.slice(-limit)}`;
+  }
   function closeOpenBubble(container) {
     const last = container.lastElementChild;
     if (last && last.classList.contains("bubble"))
@@ -496,14 +610,125 @@
     try {
       input = JSON.stringify(JSON.parse(input), null, 2);
     } catch {}
-    body.innerHTML = `<div class="section-label">input</div>${escapeHtml(stripAnsi(input))}`;
+    body.innerHTML = `<div class="section-label">input</div>${escapeHtml(boundedTail(stripAnsi(input), maxToolTextChars))}`;
     details.appendChild(summary);
     details.appendChild(body);
     container.appendChild(details);
+    trackEditedFiles(ev, details);
     closeOpenBubble(container);
     toolCount++;
     const q = toolQueues[ev.name] || (toolQueues[ev.name] = []);
     q.push(details);
+  }
+  function resetFileExplorer(visible) {
+    editedFiles = new Map;
+    explorerContextVisible = visible;
+    applyPanelVisibility();
+    renderFileExplorer();
+  }
+  function applyPanelVisibility() {
+    byId("sidebar").classList.toggle("hidden", !sidebarVisible);
+    byId("file-explorer").classList.toggle("hidden", !explorerContextVisible || !fileExplorerVisible);
+  }
+  window.addEventListener("keydown", (event) => {
+    if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.repeat)
+      return;
+    const key = event.key.toLowerCase();
+    if (key === "b" && !event.altKey) {
+      event.preventDefault();
+      sidebarVisible = !sidebarVisible;
+      savePersistedState();
+      applyPanelVisibility();
+    }
+    if (key === "b" && event.altKey) {
+      event.preventDefault();
+      fileExplorerVisible = !fileExplorerVisible;
+      savePersistedState();
+      applyPanelVisibility();
+    }
+  });
+  function normalizedFilePath(path) {
+    const cleaned = path.trim().replace(/^['"]|['"]$/g, "");
+    if (!cleaned || cleaned === "/" || cleaned.endsWith("/"))
+      return null;
+    return cleaned.replace(/\\/g, "/");
+  }
+  function pathsWrittenByTool(ev) {
+    let input = {};
+    try {
+      input = JSON.parse(ev.text || "");
+    } catch {
+      return [];
+    }
+    const paths = new Set;
+    const add = (path) => {
+      if (typeof path !== "string")
+        return;
+      const normalized = normalizedFilePath(path);
+      if (normalized)
+        paths.add(normalized);
+    };
+    const directWriteTools = new Set(["file_write", "write_file", "file_edit", "edit_file", "apply_patch"]);
+    if (directWriteTools.has(ev.name))
+      add(input.file_path ?? input.path);
+    const source = [input.command, input.code, input.patch].filter((value) => typeof value === "string").join(`
+`);
+    const patterns = [
+      /open\(\s*["']([^"']+)["']\s*,\s*["'][^"']*[wax+]/g,
+      /Path\(\s*["']([^"']+)["']\s*\)\.write_(?:text|bytes)/g,
+      /\*\*\* (?:Add|Update) File:\s*([^\r\n]+)/g,
+      /(?:^|[;&|]\s*|\s)(?:>>?|tee(?:\s+-a)?)\s*["']?([^\s"';&|]+)/gm,
+      /\bdd\b[^\r\n;&|]*\bof=([^\s;&|]+)/g
+    ];
+    for (const pattern of patterns) {
+      for (const match of source.matchAll(pattern))
+        add(match[1]);
+    }
+    return [...paths];
+  }
+  function trackEditedFiles(ev, tool) {
+    for (const path of pathsWrittenByTool(ev)) {
+      editedFiles.set(path, { path, operation: ev.name, tool });
+    }
+    renderFileExplorer();
+  }
+  function renderFileExplorer() {
+    const container = byId("explorer-files");
+    const count = byId("explorer-count");
+    count.textContent = editedFiles.size ? `(${editedFiles.size})` : "";
+    if (!editedFiles.size) {
+      container.innerHTML = `<div class="explorer-empty">No edited files yet.</div>`;
+      return;
+    }
+    container.innerHTML = "";
+    const groups = new Map;
+    for (const file of [...editedFiles.values()].sort((a, b) => a.path.localeCompare(b.path))) {
+      const slash = file.path.lastIndexOf("/");
+      const directory = slash > 0 ? file.path.slice(0, slash) : ".";
+      const group = groups.get(directory) || [];
+      group.push(file);
+      groups.set(directory, group);
+    }
+    for (const [directory, files] of groups) {
+      const heading = document.createElement("div");
+      heading.className = "explorer-dir";
+      heading.textContent = `⌄ ${directory}`;
+      heading.title = directory;
+      container.appendChild(heading);
+      for (const file of files) {
+        const button = document.createElement("button");
+        button.className = "explorer-file";
+        const name = file.path.slice(file.path.lastIndexOf("/") + 1);
+        button.title = `${file.path}
+Latest change: ${file.operation}`;
+        button.innerHTML = `<span class="file-name">${escapeHtml(name)}</span><span class="file-status">M</span>`;
+        button.onclick = () => {
+          file.tool.open = true;
+          file.tool.scrollIntoView({ behavior: "smooth", block: "center" });
+        };
+        container.appendChild(button);
+      }
+    }
   }
   function renderToolResult(container, ev) {
     const q = toolQueues[ev.name];
@@ -516,7 +741,7 @@
     summary.innerHTML = `${escapeHtml(ev.name)} <span class="badge">done</span>`;
     const body = details.querySelector(".body");
     const resultDiv = document.createElement("div");
-    resultDiv.innerHTML = `<div class="section-label">result</div>${escapeHtml(stripAnsi(ev.text || ""))}`;
+    resultDiv.innerHTML = `<div class="section-label">result</div>${escapeHtml(boundedTail(stripAnsi(ev.text || ""), maxToolTextChars))}`;
     body.appendChild(resultDiv);
     const tools = container.querySelectorAll("details.tool");
     const isMostRecent = tools.length > 0 && tools[tools.length - 1] === details;
@@ -529,11 +754,18 @@
   function escapeHtml(s) {
     return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] || c);
   }
+  function renderModelMarkdown(source) {
+    const escaped = escapeHtml(stripAnsi(source).replace(/\*\*\*\*/g, `**
+**`));
+    return escaped.replace(/\*\*([^*\n]+)\*\*(?=[^\s*])/g, "<strong>$1</strong><br>").replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>").replace(/\r?\n/g, "<br>");
+  }
   function renderEvent(container, ev) {
     switch (ev.type) {
       case "text": {
         const bubble = textNodeOrBubble(container);
-        bubble.textContent += stripAnsi(ev.text);
+        const source = boundedTail((modelTextByBubble.get(bubble) || "") + ev.text, maxModelBubbleChars);
+        modelTextByBubble.set(bubble, source);
+        bubble.innerHTML = renderModelMarkdown(source);
         break;
       }
       case "tool_use":
@@ -561,6 +793,7 @@
       }
       case "run_start":
       case "final":
+      case "usage":
         break;
       case "raw": {
         closeOpenBubble(container);
@@ -591,6 +824,12 @@
         const placeholder = container.querySelector(".empty");
         if (placeholder)
           placeholder.remove();
+        if (data.truncated && !container.querySelector(".live-window-notice")) {
+          const notice = document.createElement("div");
+          notice.className = "banner live-window-notice";
+          notice.textContent = "Showing the latest 512 KiB. Full output remains on disk.";
+          container.appendChild(notice);
+        }
         const stickToBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 40;
         for (const ev of data.events)
           renderEvent(container, ev);
