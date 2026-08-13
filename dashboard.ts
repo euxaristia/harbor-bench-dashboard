@@ -450,10 +450,16 @@ function renderSidebar(): void {
       const head = document.createElement("div");
       const jobSelected = selected && selected.job === job.name && selected.trial == null;
       head.className = "job-head" + (jobSelected ? " selected" : "");
-      head.innerHTML = `<div class="name">${escapeHtml(job.name)}</div>
+      const harborUrl = `http://${location.hostname}:8080/jobs/${encodeURIComponent(job.name)}`;
+      head.innerHTML = `<div class="job-title-row">
+          <div class="name">${escapeHtml(job.name)}</div>
+          <a class="harbor-link" href="${escapeHtml(harborUrl)}" target="_blank" rel="noopener noreferrer">Open in Harbor</a>
+        </div>
         <div class="meta">${escapeHtml(job.model_name || "")} &middot; ${escapeHtml(job.status)}
         ${jobProgress(job)} &middot; ${escapeHtml(usageText(job.usage))}</div>`;
       head.onclick = () => selectJob(job.name);
+      const harborLink = head.querySelector<HTMLAnchorElement>(".harbor-link");
+      if (harborLink) harborLink.onclick = (event) => event.stopPropagation();
       jobEl.appendChild(head);
       if (job.trials.length === 0 && job.status === "running") {
         const t = document.createElement("div");
@@ -690,7 +696,9 @@ function renderJobOverview(jobName: string, opts: { preserveScroll?: boolean } =
     </tr>`;
   }
 
+  const harborUrl = `http://${location.hostname}:8080/jobs/${encodeURIComponent(job.name)}`;
   transcript.innerHTML = `<div class="overview">
+    <div style="margin-bottom:12px"><a class="harbor-link" href="${escapeHtml(harborUrl)}" target="_blank" rel="noopener noreferrer">Open in Harbor</a></div>
     <div class="overview-summary">${cards.join("")}</div>
     <table class="overview-table">
       <thead><tr>
@@ -784,13 +792,6 @@ function closeOpenBubble(container: HTMLElement): void {
   if (last && last.classList.contains("bubble")) last.dataset.open = "0";
 }
 
-/// Shell is the tool people watch live: a foreground server hang is opaque
-/// behind a collapsed summary, while a long `file_write` body is noise. Expand
-/// shell when it is the newest tool call; leave write tools collapsed.
-function isShellTool(name: string): boolean {
-  return name === "shell" || name === "python";
-}
-
 function collapsePriorTools(container: HTMLElement): void {
   for (const el of container.querySelectorAll("details.tool")) {
     (el as HTMLDetailsElement).open = false;
@@ -805,7 +806,7 @@ function renderToolUse(container: HTMLElement, ev: { name: string; text: string 
   const details = document.createElement("details");
   details.className = "tool";
   details.dataset.toolName = ev.name;
-  details.open = isShellTool(ev.name);
+  details.open = true;
   const summary = document.createElement("summary");
   summary.innerHTML = `${escapeHtml(ev.name)} <span class="badge">running…</span>`;
   const body = document.createElement("div");
@@ -956,11 +957,11 @@ function renderToolResult(container: HTMLElement, ev: BenchToolResultEvent): voi
   resultDiv.innerHTML = `<div class="section-label">result</div>${escapeHtml(boundedTail(stripAnsi(ev.text || ""), maxToolTextChars))}`;
   body.appendChild(resultDiv);
 
-  // A completed shell that is still the newest call stays open so the input
-  // (and result) remain visible until the next tool call arrives.
+  // Keep the newest call's current state. This leaves it expanded by default,
+  // but does not reopen it after the user collapses it while it is running.
   const tools = container.querySelectorAll("details.tool");
   const isMostRecent = tools.length > 0 && tools[tools.length - 1] === details;
-  details.open = isMostRecent && isShellTool(ev.name);
+  if (!isMostRecent) details.open = false;
 }
 
 // Terminal output reaches us with its ANSI control sequences intact: colour

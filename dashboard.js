@@ -290,10 +290,17 @@
         const head = document.createElement("div");
         const jobSelected = selected && selected.job === job.name && selected.trial == null;
         head.className = "job-head" + (jobSelected ? " selected" : "");
-        head.innerHTML = `<div class="name">${escapeHtml(job.name)}</div>
+        const harborUrl = `http://${location.hostname}:8080/jobs/${encodeURIComponent(job.name)}`;
+        head.innerHTML = `<div class="job-title-row">
+          <div class="name">${escapeHtml(job.name)}</div>
+          <a class="harbor-link" href="${escapeHtml(harborUrl)}" target="_blank" rel="noopener noreferrer">Open in Harbor</a>
+        </div>
         <div class="meta">${escapeHtml(job.model_name || "")} &middot; ${escapeHtml(job.status)}
         ${jobProgress(job)} &middot; ${escapeHtml(usageText(job.usage))}</div>`;
         head.onclick = () => selectJob(job.name);
+        const harborLink = head.querySelector(".harbor-link");
+        if (harborLink)
+          harborLink.onclick = (event) => event.stopPropagation();
         jobEl.appendChild(head);
         if (job.trials.length === 0 && job.status === "running") {
           const t = document.createElement("div");
@@ -503,7 +510,9 @@
       <td>${escapeHtml(trialElapsed(trial))}</td>
     </tr>`;
     }
+    const harborUrl = `http://${location.hostname}:8080/jobs/${encodeURIComponent(job.name)}`;
     transcript.innerHTML = `<div class="overview">
+    <div style="margin-bottom:12px"><a class="harbor-link" href="${escapeHtml(harborUrl)}" target="_blank" rel="noopener noreferrer">Open in Harbor</a></div>
     <div class="overview-summary">${cards.join("")}</div>
     <table class="overview-table">
       <thead><tr>
@@ -588,9 +597,6 @@ ${text.slice(-limit)}`;
     if (last && last.classList.contains("bubble"))
       last.dataset.open = "0";
   }
-  function isShellTool(name) {
-    return name === "shell" || name === "python";
-  }
   function collapsePriorTools(container) {
     for (const el of container.querySelectorAll("details.tool")) {
       el.open = false;
@@ -601,7 +607,7 @@ ${text.slice(-limit)}`;
     const details = document.createElement("details");
     details.className = "tool";
     details.dataset.toolName = ev.name;
-    details.open = isShellTool(ev.name);
+    details.open = true;
     const summary = document.createElement("summary");
     summary.innerHTML = `${escapeHtml(ev.name)} <span class="badge">running…</span>`;
     const body = document.createElement("div");
@@ -745,7 +751,8 @@ Latest change: ${file.operation}`;
     body.appendChild(resultDiv);
     const tools = container.querySelectorAll("details.tool");
     const isMostRecent = tools.length > 0 && tools[tools.length - 1] === details;
-    details.open = isMostRecent && isShellTool(ev.name);
+    if (!isMostRecent)
+      details.open = false;
   }
   var ANSI_PATTERN = /\u001B\[[0-9;?]*[ -\/]*[@-~]|\u001B\][^\u0007]*\u0007/g;
   function stripAnsi(s) {
