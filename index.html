@@ -53,6 +53,13 @@
   .explorer-file .file-status { color: var(--warn); font-size: 11px; }
   .job { border-bottom: 1px solid var(--border); }
   .job-head { padding: 10px 12px; cursor: pointer; }
+  .job-title-row { display: flex; align-items: center; gap: 8px; }
+  .job-title-row .name { flex: 1; min-width: 0; }
+  .harbor-link {
+    color: var(--accent); font-size: 11px; font-weight: normal; text-decoration: none;
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; white-space: nowrap;
+  }
+  .harbor-link:hover { background: #1f2530; }
   .job-head:hover { background: #1f2530; }
   .job-head.selected { background: #1c2b3d; }
   .job-head .name { font-weight: 600; }
