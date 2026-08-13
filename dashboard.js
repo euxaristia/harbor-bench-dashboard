@@ -753,6 +753,7 @@ Latest change: ${file.operation}`;
   }
   function escapeHtml(s) {
     return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] || c);
+  }
   function renderModelMarkdown(source) {
     const escaped = escapeHtml(stripAnsi(source).replace(/\*\*\*\*/g, `**
 **`));
