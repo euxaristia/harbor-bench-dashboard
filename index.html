@@ -19,6 +19,7 @@
     width: 320px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid var(--border);
     background: var(--panel);
   }
+  #sidebar.hidden { display: none; }
   .sidebar-filter {
     padding: 8px 12px; border-bottom: 1px solid var(--border); background: #161b22;
     font-size: 11px; color: var(--dim); display: flex; align-items: center; justify-content: space-between;
@@ -27,6 +28,29 @@
   .sidebar-filter input { cursor: pointer; margin: 0; }
   .junk-count { color: var(--dim); font-size: 11px; }
   #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #file-explorer {
+    width: 300px; flex-shrink: 0; overflow: hidden; border-left: 1px solid var(--border);
+    background: var(--panel); display: flex; flex-direction: column;
+  }
+  #file-explorer.hidden { display: none; }
+  .explorer-head {
+    padding: 9px 12px; border-bottom: 1px solid var(--border); color: var(--dim);
+    font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+  }
+  #explorer-files { overflow-y: auto; padding: 5px 0 12px; }
+  .explorer-empty { color: var(--dim); padding: 18px 12px; font-size: 11px; }
+  .explorer-dir {
+    padding: 6px 10px 3px; color: var(--dim); font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .explorer-file {
+    width: 100%; border: 0; background: transparent; color: var(--text); font: inherit;
+    text-align: left; padding: 5px 10px 5px 24px; cursor: pointer; display: flex; gap: 8px;
+    align-items: center;
+  }
+  .explorer-file:hover { background: #1f2530; }
+  .explorer-file .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .explorer-file .file-status { color: var(--warn); font-size: 11px; }
   .job { border-bottom: 1px solid var(--border); }
   .job-head { padding: 10px 12px; cursor: pointer; }
   .job-head:hover { background: #1f2530; }
@@ -100,6 +124,10 @@
   <div id="header"><span class="empty" style="padding:0">Select a trial</span></div>
   <div id="transcript"><div class="empty">Nothing selected yet. Pick a trial on the left.</div></div>
 </div>
+<aside id="file-explorer" class="hidden">
+  <div class="explorer-head">Explorer <span id="explorer-count"></span></div>
+  <div id="explorer-files"><div class="explorer-empty">No edited files yet.</div></div>
+</aside>
 <script>__DASHBOARD_JS__</script>
 </body>
 </html>

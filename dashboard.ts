@@ -16,6 +16,16 @@ interface VerifierSummary {
   failures: VerifierFailure[];
 }
 
+interface UsageSummary {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cache_read_tokens: number;
+  cache_create_tokens: number;
+  cache_miss_tokens: number;
+  estimated_cost_usd: number;
+}
+
 interface TrialSummary {
   name: string;
   verifier: VerifierSummary | null;
@@ -27,6 +37,7 @@ interface TrialSummary {
   exception: string | null;
   started_at: number | null;
   last_activity_at: number | null;
+  usage: UsageSummary;
 }
 
 interface JobSummary {
@@ -42,6 +53,7 @@ interface JobSummary {
   n_errored: number | null;
   n_total: number | null;
   trials: TrialSummary[];
+  usage: UsageSummary;
 }
 
 interface BuildSummary {
@@ -57,11 +69,22 @@ interface BuildSummary {
   current_unit: string | null;
 }
 
+interface PersistedState {
+  selected: { job: string; trial: string | null } | null;
+  selectedBuild: string | null;
+  sidebarVisible: boolean;
+  fileExplorerVisible: boolean;
+  buildsExpanded: boolean;
+  expandedDates: string[];
+  hideJunkRuns: boolean;
+}
+
 interface BenchTextEvent { type: "text"; text: string; }
 interface BenchToolUseEvent { type: "tool_use"; name: string; text: string; }
 interface BenchToolResultEvent { type: "tool_result"; name: string; text: string; }
 interface BenchErrorEvent { type: "error"; message: string; }
 interface BenchRunEndEvent { type: "run_end"; status: string; exitCode: number; }
+interface BenchUsageEvent { type: "usage"; inputTokens: number; outputTokens: number; totalTokens: number; }
 interface BenchRawEvent { type: "raw"; text: string; }
 interface BenchOtherEvent { type: string; [key: string]: unknown; }
 
@@ -71,12 +94,14 @@ type BenchEvent =
   | BenchToolResultEvent
   | BenchErrorEvent
   | BenchRunEndEvent
+  | BenchUsageEvent
   | BenchRawEvent
   | BenchOtherEvent;
 
 interface EventsResponse {
   events: BenchEvent[];
   offset: number;
+  truncated?: boolean;
 }
 
 function byId<T extends HTMLElement>(id: string): T {
@@ -89,32 +114,102 @@ function localDateKey(d: Date): string {
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
+
+function compactNumber(value: number): string {
+  return Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value || 0);
+}
+
+function formatCost(value: number): string {
+  if (!value) return "$0";
+  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
+}
+
+function usageText(usage: UsageSummary | undefined): string {
+  if (!usage) return "0 tokens · $0";
+  return `${compactNumber(usage.total_tokens)} tokens · ${formatCost(usage.estimated_cost_usd)}`;
+}
 const todayKey = localDateKey(new Date());
+const stateKey = "harbor-bench-dashboard-state-v1";
+
+function loadPersistedState(): Partial<PersistedState> {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(stateKey) || "{}");
+    return value && typeof value === "object" ? value as Partial<PersistedState> : {};
+  } catch {
+    return {};
+  }
+}
+
+const persistedState = loadPersistedState();
+const persistedSelection = persistedState.selected;
+const initialSelected = persistedSelection &&
+  typeof persistedSelection.job === "string" &&
+  (typeof persistedSelection.trial === "string" || persistedSelection.trial === null)
+  ? persistedSelection
+  : null;
 
 let jobsCache: JobSummary[] = [];
 let buildsCache: BuildSummary[] = [];
 // trial === null means the job overview is selected, not a single transcript.
-let selected: { job: string; trial: string | null } | null = null;
-let selectedBuild: string | null = null;
+let selected: { job: string; trial: string | null } | null = initialSelected;
+let selectedBuild: string | null = typeof persistedState.selectedBuild === "string"
+  ? persistedState.selectedBuild
+  : null;
 let eventsOffset = 0;
 let buildLogOffset = 0;
 // tool name -> queue of open <details> elements awaiting their result, FIFO.
 let toolQueues: Record<string, HTMLDetailsElement[]> = {};
 let eventsTimer: ReturnType<typeof setInterval> | null = null;
 let toolCount = 0;
+const modelTextByBubble = new WeakMap<HTMLDivElement, string>();
+const maxModelBubbleChars = 32_000;
+const maxToolTextChars = 16_000;
+let sidebarVisible = typeof persistedState.sidebarVisible === "boolean" ? persistedState.sidebarVisible : true;
+let explorerContextVisible = false;
+let fileExplorerVisible = typeof persistedState.fileExplorerVisible === "boolean"
+  ? persistedState.fileExplorerVisible
+  : true;
+let buildsExpanded = typeof persistedState.buildsExpanded === "boolean" ? persistedState.buildsExpanded : true;
+interface EditedFile {
+  path: string;
+  operation: string;
+  tool: HTMLDetailsElement;
+}
+let editedFiles = new Map<string, EditedFile>();
 // Which date groups are expanded in the sidebar. Seeded once here, at
 // script load, rather than recomputed inside renderSidebar(): that function
 // reruns every 4s as jobs are polled, and re-deciding "today should be open"
 // on every call would silently re-expand a group the user had just clicked
 // closed.
-const expandedDates = new Set<string>([todayKey]);
+const expandedDates = new Set<string>(
+  Array.isArray(persistedState.expandedDates)
+    ? persistedState.expandedDates.filter((date): date is string => typeof date === "string")
+    : [todayKey],
+);
 
 function fmtDuration(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));
   return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
-let hideJunkRuns = true;
+let hideJunkRuns = typeof persistedState.hideJunkRuns === "boolean" ? persistedState.hideJunkRuns : true;
+let persistedSelectionApplied = false;
+
+function savePersistedState(): void {
+  try {
+    localStorage.setItem(stateKey, JSON.stringify({
+      selected,
+      selectedBuild,
+      sidebarVisible,
+      fileExplorerVisible,
+      buildsExpanded,
+      expandedDates: [...expandedDates],
+      hideJunkRuns,
+    } satisfies PersistedState));
+  } catch {
+    // Browsing still works when storage is disabled or full.
+  }
+}
 
 function isJunkJob(job: JobSummary): boolean {
   if (job.status === "running") return false;
@@ -131,6 +226,7 @@ function isJunkJob(job: JobSummary): boolean {
 // must show a duration that stops too, not one that keeps climbing forever
 // just because the dashboard tab is still open.
 function trialDotClass(trial: TrialSummary): string {
+  if (trial.status === "stalled") return "stalled";
   if (trial.status === "errored") return "errored";
   if (trial.reward != null && trial.reward <= 0) return "errored";
   if (trial.exception) return "errored";
@@ -167,6 +263,38 @@ async function pollJobs(): Promise<void> {
     ]);
     jobsCache = await jobsResponse.json();
     buildsCache = await buildsResponse.json();
+
+    let clearedMissingSelection = false;
+    if (selectedBuild && !buildsCache.some((build) => build.name === selectedBuild)) {
+      selectedBuild = null;
+      clearedMissingSelection = true;
+    }
+    if (selected) {
+      const job = jobsCache.find((candidate) => candidate.name === selected!.job);
+      const trialExists = selected.trial === null || job?.trials.some((trial) => trial.name === selected!.trial);
+      if (!job || !trialExists) {
+        selected = null;
+        clearedMissingSelection = true;
+      }
+    }
+    if (selected && selectedBuild) {
+      selected = null;
+      clearedMissingSelection = true;
+    }
+    if (clearedMissingSelection) savePersistedState();
+
+    if (!persistedSelectionApplied) {
+      persistedSelectionApplied = true;
+      if (selectedBuild) {
+        selectBuild(selectedBuild);
+        return;
+      }
+      if (selected) {
+        if (selected.trial) selectTrial(selected.job, selected.trial);
+        else selectJob(selected.job);
+        return;
+      }
+    }
     renderSidebar();
     // The header's status label is set once by updateHeader() when a trial
     // is selected and otherwise never touched again, unlike elapsed time and
@@ -179,6 +307,8 @@ async function pollJobs(): Promise<void> {
         const trial = job && job.trials.find((t) => t.name === selected!.trial);
         const statusEl = document.getElementById("trial-status");
         if (statusEl && trial) statusEl.textContent = trial.status;
+        const usageEl = document.getElementById("trial-usage");
+        if (usageEl && trial) usageEl.textContent = usageText(trial.usage);
       } else {
         // Keep the overview live as trials finish without blowing away scroll.
         renderJobOverview(selected.job, { preserveScroll: true });
@@ -216,8 +346,9 @@ function jobProgress(job: JobSummary): string {
   // trap: it looks like the whole job finished green. Show a fraction among
   // scored trials. The status immediately before this already says "done"
   // for a completed job, so repeating "1/1 done" adds no information.
-  const scored = job.trials.filter((t) => t.reward != null);
-  const unfinished = job.n_total - job.n_completed - (job.n_errored || 0);
+  const scored = job.trials.filter((t) => t.status !== "running");
+  const stalled = job.trials.filter((t) => t.status === "stalled").length;
+  const unfinished = job.n_total - job.n_completed - (job.n_errored || 0) - stalled;
   if (scored.length) {
     const passed = scored.filter((t) => (t.reward || 0) > 0).length;
     const cls = passed > 0 ? "verifier-ok" : "verifier-bad";
@@ -229,6 +360,7 @@ function jobProgress(job: JobSummary): string {
   if (unfinished > 0 && job.status !== "running") {
     s += ` &middot; <span class="verifier-bad">${unfinished} unfinished</span>`;
   }
+  if (stalled > 0) s += ` &middot; ${stalled} stalled`;
   if (job.n_errored) s += ` &middot; ${job.n_errored} errored`;
   return s;
 }
@@ -248,6 +380,7 @@ function renderSidebar(): void {
   if (toggleInput) {
     toggleInput.onchange = () => {
       hideJunkRuns = toggleInput.checked;
+      savePersistedState();
       renderSidebar();
     };
   }
@@ -256,7 +389,11 @@ function renderSidebar(): void {
   if (buildsCache.length) {
     const buildsGroup = document.createElement("details");
     buildsGroup.className = "date-group";
-    buildsGroup.open = true;
+    buildsGroup.open = buildsExpanded;
+    buildsGroup.ontoggle = () => {
+      buildsExpanded = buildsGroup.open;
+      savePersistedState();
+    };
     const summary = document.createElement("summary");
     summary.className = "date-head";
     summary.textContent = `Builds — ${buildsCache.length}`;
@@ -299,6 +436,7 @@ function renderSidebar(): void {
     dateEl.ontoggle = () => {
       if (dateEl.open) expandedDates.add(group.date);
       else expandedDates.delete(group.date);
+      savePersistedState();
     };
     const dateSummary = document.createElement("summary");
     dateSummary.className = "date-head";
@@ -314,7 +452,7 @@ function renderSidebar(): void {
       head.className = "job-head" + (jobSelected ? " selected" : "");
       head.innerHTML = `<div class="name">${escapeHtml(job.name)}</div>
         <div class="meta">${escapeHtml(job.model_name || "")} &middot; ${escapeHtml(job.status)}
-        ${jobProgress(job)}</div>`;
+        ${jobProgress(job)} &middot; ${escapeHtml(usageText(job.usage))}</div>`;
       head.onclick = () => selectJob(job.name);
       jobEl.appendChild(head);
       if (job.trials.length === 0 && job.status === "running") {
@@ -350,9 +488,11 @@ function renderSidebar(): void {
 function selectJob(job: string): void {
   selectedBuild = null;
   selected = { job, trial: null };
+  savePersistedState();
   eventsOffset = 0;
   toolQueues = {};
   toolCount = 0;
+  resetFileExplorer(false);
   if (eventsTimer) {
     clearInterval(eventsTimer);
     eventsTimer = null;
@@ -364,9 +504,11 @@ function selectJob(job: string): void {
 function selectTrial(job: string, trial: string): void {
   selectedBuild = null;
   selected = { job, trial };
+  savePersistedState();
   eventsOffset = 0;
   toolQueues = {};
   toolCount = 0;
+  resetFileExplorer(true);
   const jobData = jobsCache.find((j) => j.name === job);
   const trialData = jobData && jobData.trials.find((t) => t.name === trial);
   const transcript = byId<HTMLDivElement>("transcript");
@@ -398,9 +540,11 @@ function buildElapsed(build: BuildSummary): string {
 function selectBuild(name: string): void {
   selected = null;
   selectedBuild = name;
+  savePersistedState();
   buildLogOffset = 0;
   toolQueues = {};
   toolCount = 0;
+  resetFileExplorer(false);
   if (eventsTimer) clearInterval(eventsTimer);
   const transcript = byId<HTMLDivElement>("transcript");
   transcript.innerHTML = `<div class="bubble build-log"></div>`;
@@ -465,7 +609,7 @@ function armStats(job: JobSummary): { arm: string; pass: number; fail: number; r
     if (trial.reward != null) {
       if ((trial.reward || 0) > 0) row.pass += 1;
       else row.fail += 1;
-    } else if (trial.status === "done" || trial.status === "errored") {
+    } else if (trial.status !== "running") {
       row.fail += 1;
     } else {
       row.running += 1;
@@ -485,7 +629,7 @@ function renderJobOverview(jobName: string, opts: { preserveScroll?: boolean } =
     return;
   }
 
-  const scored = job.trials.filter((t) => t.reward != null);
+  const scored = job.trials.filter((t) => t.status !== "running");
   const passed = scored.filter((t) => (t.reward || 0) > 0).length;
   const running = job.trials.filter((t) => t.status === "running").length;
   const progress = job.status === "running"
@@ -497,6 +641,7 @@ function renderJobOverview(jobName: string, opts: { preserveScroll?: boolean } =
     <span class="stat">${escapeHtml(job.status)}</span>
     ${progress}
     <span class="stat">passed ${passed}/${scored.length}</span>
+    <span class="stat">${escapeHtml(usageText(job.usage))}</span>
     <span class="stat">click a trial for its transcript</span>`;
 
   const scrollTop = opts.preserveScroll ? transcript.scrollTop : 0;
@@ -507,6 +652,9 @@ function renderJobOverview(jobName: string, opts: { preserveScroll?: boolean } =
     `<div class="overview-card"><div class="label">passed</div><div class="value verifier-ok">${passed}</div></div>`,
     `<div class="overview-card"><div class="label">failed</div><div class="value ${scored.length - passed ? "verifier-bad" : ""}">${scored.length - passed}</div></div>`,
     `<div class="overview-card"><div class="label">running</div><div class="value">${running}</div></div>`,
+    `<div class="overview-card"><div class="label">tokens</div><div class="value">${compactNumber(job.usage.total_tokens)}</div></div>`,
+    `<div class="overview-card"><div class="label">cached input</div><div class="value">${compactNumber(job.usage.cache_read_tokens)}</div></div>`,
+    `<div class="overview-card"><div class="label">estimated cost</div><div class="value">${formatCost(job.usage.estimated_cost_usd)}</div></div>`,
   ];
   for (const arm of arms) {
     const done = arm.pass + arm.fail;
@@ -536,6 +684,8 @@ function renderJobOverview(jobName: string, opts: { preserveScroll?: boolean } =
       <td>${escapeHtml(trial.status)}</td>
       <td>${escapeHtml(reward)}</td>
       <td>${escapeHtml(checks)}</td>
+      <td title="${trial.usage.input_tokens} input, ${trial.usage.cache_read_tokens} cached, ${trial.usage.output_tokens} output">${compactNumber(trial.usage.total_tokens)}</td>
+      <td>${formatCost(trial.usage.estimated_cost_usd)}</td>
       <td>${escapeHtml(trialElapsed(trial))}</td>
     </tr>`;
   }
@@ -544,7 +694,7 @@ function renderJobOverview(jobName: string, opts: { preserveScroll?: boolean } =
     <div class="overview-summary">${cards.join("")}</div>
     <table class="overview-table">
       <thead><tr>
-        <th></th><th>trial</th><th>agent</th><th>status</th><th>reward</th><th>checks</th><th>elapsed</th>
+        <th></th><th>trial</th><th>agent</th><th>status</th><th>reward</th><th>checks</th><th>tokens</th><th>cost</th><th>elapsed</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>
@@ -567,6 +717,7 @@ function updateHeader(): void {
     <span class="stat" id="tool-count">${toolCount} tool calls</span>
     <span class="stat" id="elapsed-stat">${currentElapsed()}</span>
     <span class="stat" id="trial-status">${trial ? trial.status : ""}</span>
+    <span class="stat" id="trial-usage">${escapeHtml(usageText(trial?.usage))}</span>
     ${verifierStat(trial)}`;
 }
 
@@ -622,6 +773,12 @@ function textNodeOrBubble(container: HTMLElement): HTMLDivElement {
   container.appendChild(div);
   return div;
 }
+
+function boundedTail(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  return `[Earlier output omitted from the live view. Full output remains on disk.]\n\n${text.slice(-limit)}`;
+}
+
 function closeOpenBubble(container: HTMLElement): void {
   const last = container.lastElementChild as HTMLElement | null;
   if (last && last.classList.contains("bubble")) last.dataset.open = "0";
@@ -659,14 +816,130 @@ function renderToolUse(container: HTMLElement, ev: { name: string; text: string 
   } catch {
     // not JSON; show the raw string as-is
   }
-  body.innerHTML = `<div class="section-label">input</div>${escapeHtml(stripAnsi(input))}`;
+  body.innerHTML = `<div class="section-label">input</div>${escapeHtml(boundedTail(stripAnsi(input), maxToolTextChars))}`;
   details.appendChild(summary);
   details.appendChild(body);
   container.appendChild(details);
+  trackEditedFiles(ev, details);
   closeOpenBubble(container);
   toolCount++;
   const q = toolQueues[ev.name] || (toolQueues[ev.name] = []);
   q.push(details);
+}
+
+function resetFileExplorer(visible: boolean): void {
+  editedFiles = new Map();
+  explorerContextVisible = visible;
+  applyPanelVisibility();
+  renderFileExplorer();
+}
+
+function applyPanelVisibility(): void {
+  byId<HTMLElement>("sidebar").classList.toggle("hidden", !sidebarVisible);
+  byId<HTMLElement>("file-explorer").classList.toggle(
+    "hidden",
+    !explorerContextVisible || !fileExplorerVisible,
+  );
+}
+
+window.addEventListener("keydown", (event) => {
+  if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.repeat) return;
+  const key = event.key.toLowerCase();
+  if (key === "b" && !event.altKey) {
+    event.preventDefault();
+    sidebarVisible = !sidebarVisible;
+    savePersistedState();
+    applyPanelVisibility();
+  }
+  if (key === "b" && event.altKey) {
+    event.preventDefault();
+    fileExplorerVisible = !fileExplorerVisible;
+    savePersistedState();
+    applyPanelVisibility();
+  }
+});
+
+function normalizedFilePath(path: string): string | null {
+  const cleaned = path.trim().replace(/^['"]|['"]$/g, "");
+  if (!cleaned || cleaned === "/" || cleaned.endsWith("/")) return null;
+  return cleaned.replace(/\\/g, "/");
+}
+
+function pathsWrittenByTool(ev: { name: string; text: string }): string[] {
+  let input: Record<string, unknown> = {};
+  try {
+    input = JSON.parse(ev.text || "") as Record<string, unknown>;
+  } catch {
+    return [];
+  }
+  const paths = new Set<string>();
+  const add = (path: unknown) => {
+    if (typeof path !== "string") return;
+    const normalized = normalizedFilePath(path);
+    if (normalized) paths.add(normalized);
+  };
+  const directWriteTools = new Set(["file_write", "write_file", "file_edit", "edit_file", "apply_patch"]);
+  if (directWriteTools.has(ev.name)) add(input.file_path ?? input.path);
+
+  const source = [input.command, input.code, input.patch]
+    .filter((value): value is string => typeof value === "string")
+    .join("\n");
+  const patterns = [
+    /open\(\s*["']([^"']+)["']\s*,\s*["'][^"']*[wax+]/g,
+    /Path\(\s*["']([^"']+)["']\s*\)\.write_(?:text|bytes)/g,
+    /\*\*\* (?:Add|Update) File:\s*([^\r\n]+)/g,
+    /(?:^|[;&|]\s*|\s)(?:>>?|tee(?:\s+-a)?)\s*["']?([^\s"';&|]+)/gm,
+    /\bdd\b[^\r\n;&|]*\bof=([^\s;&|]+)/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) add(match[1]);
+  }
+  return [...paths];
+}
+
+function trackEditedFiles(ev: { name: string; text: string }, tool: HTMLDetailsElement): void {
+  for (const path of pathsWrittenByTool(ev)) {
+    editedFiles.set(path, { path, operation: ev.name, tool });
+  }
+  renderFileExplorer();
+}
+
+function renderFileExplorer(): void {
+  const container = byId<HTMLDivElement>("explorer-files");
+  const count = byId<HTMLSpanElement>("explorer-count");
+  count.textContent = editedFiles.size ? `(${editedFiles.size})` : "";
+  if (!editedFiles.size) {
+    container.innerHTML = `<div class="explorer-empty">No edited files yet.</div>`;
+    return;
+  }
+  container.innerHTML = "";
+  const groups = new Map<string, EditedFile[]>();
+  for (const file of [...editedFiles.values()].sort((a, b) => a.path.localeCompare(b.path))) {
+    const slash = file.path.lastIndexOf("/");
+    const directory = slash > 0 ? file.path.slice(0, slash) : ".";
+    const group = groups.get(directory) || [];
+    group.push(file);
+    groups.set(directory, group);
+  }
+  for (const [directory, files] of groups) {
+    const heading = document.createElement("div");
+    heading.className = "explorer-dir";
+    heading.textContent = `⌄ ${directory}`;
+    heading.title = directory;
+    container.appendChild(heading);
+    for (const file of files) {
+      const button = document.createElement("button");
+      button.className = "explorer-file";
+      const name = file.path.slice(file.path.lastIndexOf("/") + 1);
+      button.title = `${file.path}\nLatest change: ${file.operation}`;
+      button.innerHTML = `<span class="file-name">${escapeHtml(name)}</span><span class="file-status">M</span>`;
+      button.onclick = () => {
+        file.tool.open = true;
+        file.tool.scrollIntoView({ behavior: "smooth", block: "center" });
+      };
+      container.appendChild(button);
+    }
+  }
 }
 
 function renderToolResult(container: HTMLElement, ev: BenchToolResultEvent): void {
@@ -680,7 +953,7 @@ function renderToolResult(container: HTMLElement, ev: BenchToolResultEvent): voi
   summary.innerHTML = `${escapeHtml(ev.name)} <span class="badge">done</span>`;
   const body = details.querySelector(".body")!;
   const resultDiv = document.createElement("div");
-  resultDiv.innerHTML = `<div class="section-label">result</div>${escapeHtml(stripAnsi(ev.text || ""))}`;
+  resultDiv.innerHTML = `<div class="section-label">result</div>${escapeHtml(boundedTail(stripAnsi(ev.text || ""), maxToolTextChars))}`;
   body.appendChild(resultDiv);
 
   // A completed shell that is still the newest call stays open so the input
@@ -730,11 +1003,24 @@ function escapeHtml(s: any): string {
   );
 }
 
+function renderModelMarkdown(source: string): string {
+  const escaped = escapeHtml(stripAnsi(source).replace(/\*\*\*\*/g, "**\n**"));
+  return escaped
+    .replace(/\*\*([^*\n]+)\*\*(?=[^\s*])/g, "<strong>$1</strong><br>")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\r?\n/g, "<br>");
+}
+
 function renderEvent(container: HTMLElement, ev: BenchEvent): void {
   switch (ev.type) {
     case "text": {
       const bubble = textNodeOrBubble(container);
-      bubble.textContent += stripAnsi((ev as BenchTextEvent).text);
+      const source = boundedTail(
+        (modelTextByBubble.get(bubble) || "") + (ev as BenchTextEvent).text,
+        maxModelBubbleChars,
+      );
+      modelTextByBubble.set(bubble, source);
+      bubble.innerHTML = renderModelMarkdown(source);
       break;
     }
     case "tool_use":
@@ -762,6 +1048,7 @@ function renderEvent(container: HTMLElement, ev: BenchEvent): void {
     }
     case "run_start":
     case "final":
+    case "usage":
       break; // final duplicates the streamed text bubbles; run_start has nothing to show yet
     case "raw": {
       // Any line that is not JSON. Usually a stray warning on the same fd,
@@ -798,6 +1085,12 @@ async function pollEvents(): Promise<void> {
       const container = byId<HTMLDivElement>("transcript");
       const placeholder = container.querySelector(".empty");
       if (placeholder) placeholder.remove();
+      if (data.truncated && !container.querySelector(".live-window-notice")) {
+        const notice = document.createElement("div");
+        notice.className = "banner live-window-notice";
+        notice.textContent = "Showing the latest 512 KiB. Full output remains on disk.";
+        container.appendChild(notice);
+      }
       const stickToBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 40;
       for (const ev of data.events) renderEvent(container, ev);
       keepVerifierLast(container);

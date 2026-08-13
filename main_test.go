@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +32,32 @@ func TestTailEventsOnlyAdvancesPastCompleteLines(t *testing.T) {
 	}
 }
 
+func TestTailEventsBoundsInitialTranscript(t *testing.T) {
+	trial := t.TempDir()
+	agent := filepath.Join(trial, "agent")
+	if err := os.Mkdir(agent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"text","text":"` + strings.Repeat("x", 1000) + `"}` + "\n"
+	content := strings.Repeat(line, 600) + `{"type":"text","text":"latest"}` + "\n"
+	if err := os.WriteFile(filepath.Join(agent, "events.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := tailEvents(trial, 0)
+	if result["truncated"] != true {
+		t.Fatal("initial transcript was not truncated")
+	}
+	events := result["events"].([]any)
+	if len(events) >= 601 {
+		t.Fatalf("events = %d, want a bounded tail", len(events))
+	}
+	last := events[len(events)-1].(map[string]any)
+	if last["text"] != "latest" {
+		t.Fatalf("last event = %#v, want latest", last)
+	}
+}
+
 func TestSummarizeBuild(t *testing.T) {
 	dir := t.TempDir()
 	meta := object{"target": "linux-x86_64", "status": "running", "started_at": "2026-08-08T12:00:00Z"}
@@ -45,6 +72,30 @@ func TestSummarizeBuild(t *testing.T) {
 	build := summarizeBuild(dir)
 	if build.Phase != "compiling release binary" || build.CompiledUnits != 2 || build.CurrentUnit != "cairn-code" {
 		t.Fatalf("unexpected build summary: %+v", build)
+	}
+}
+
+func TestSummarizeTrialMarksPreAgentFailureStalled(t *testing.T) {
+	trial := t.TempDir()
+	result := object{
+		"agent_result":    nil,
+		"verifier_result": nil,
+		"exception_info":  object{"exception_type": "RuntimeError"},
+	}
+	data, _ := json.Marshal(result)
+	if err := os.WriteFile(filepath.Join(trial, "result.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trial, "exception.txt"), []byte("environment setup failed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	summary := summarizeTrial(trial)
+	if summary.Status != "stalled" || summary.AgentBytes != 0 {
+		t.Fatalf("unexpected trial summary: %+v", summary)
+	}
+	if summary.Exception != "environment setup failed" {
+		t.Fatalf("exception = %#v", summary.Exception)
 	}
 }
 
