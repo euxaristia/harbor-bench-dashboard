@@ -54,7 +54,7 @@ the one way to make the two drift.
 ## What it shows
 
 - **Job and trial status**: running, done, errored, or `stalled`, a trial
-  with no `result.json` and nothing written to disk in the last two
+  with no `result.json` and nothing written to disk in the last ten
   minutes, which is what a crashed harness process looks like from the
   outside (it never gets a proper result, so nothing else distinguishes it
   from one that's still actually working).

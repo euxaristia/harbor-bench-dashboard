@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	staleAfter    = 2 * time.Minute
+	staleAfter    = 10 * time.Minute
 	toolCallGrace = 15 * time.Minute
 	cacheLifetime = 500 * time.Millisecond
 )
