@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTailEventsOnlyAdvancesPastCompleteLines(t *testing.T) {
@@ -99,6 +100,45 @@ func TestSummarizeTrialMarksPreAgentFailureStalled(t *testing.T) {
 	}
 }
 
+func TestSummarizeTrialWaitsTenMinutesBeforeMarkingQuietRunStalled(t *testing.T) {
+	trial := t.TempDir()
+	agent := filepath.Join(trial, "agent")
+	if err := os.Mkdir(agent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(trial, "lock.json")
+	log := filepath.Join(agent, "events.txt")
+	if err := os.WriteFile(lock, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(log, []byte("quiet provider request\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	threeMinutesAgo := time.Now().Add(-3 * time.Minute)
+	if err := os.Chtimes(lock, threeMinutesAgo, threeMinutesAgo); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(log, threeMinutesAgo, threeMinutesAgo); err != nil {
+		t.Fatal(err)
+	}
+	if summary := summarizeTrial(trial); summary.Status != "running" {
+		t.Fatalf("three-minute quiet trial status = %q, want running", summary.Status)
+	}
+
+	elevenMinutesAgo := time.Now().Add(-11 * time.Minute)
+	if err := filepath.WalkDir(trial, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, elevenMinutesAgo, elevenMinutesAgo)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if summary := summarizeTrial(trial); summary.Status != "stalled" {
+		t.Fatalf("eleven-minute quiet trial status = %q, want stalled", summary.Status)
+	}
+}
 func TestSafeChildRejectsTraversal(t *testing.T) {
 	if _, ok := safeChild(t.TempDir(), ".."); ok {
 		t.Fatal("accepted parent traversal")
